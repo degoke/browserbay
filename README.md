@@ -73,7 +73,7 @@ The client is a thin wrapper over a small HTTP and WebSocket API (types in [`src
 ### The client
 
 ```js
-const box = createBrowserBox({ url, apiKey, namespace?, allowOtherBoxes?, logger?, fetch?, now? })
+const box = createBrowserBox({ url, apiKey, namespace?, allowOtherBoxes?: string[] | true, logger?, fetch?, now? })
 
 box.acquire({ runId, maxLifetimeSeconds, waitMs? })  // → Slot
 box.slot(stored)                                      // a Slot from what you saved earlier; makes no request
@@ -88,7 +88,7 @@ slot.release()   // idempotent
 JSON.stringify(slot)   // what to save to come back to this browser later (it contains the token: store it like a secret)
 ```
 
-`runId` is your own id for what the browser is for (a run, a task, a job). The box hands it back in `list()`, so `reap` can ask "is this still needed?" and release browsers a crash orphaned. **Reconnecting**: save `JSON.stringify(slot)`, later `box.slot(JSON.parse(saved))`, check `isAlive()`, and reconnect: the same pages are still there, which is how a service can hand a browser to a person and take it back. Two cautions. The saved slot holds the slot token, so store it like a secret. And it names the box it lives on: the client only sends its API key and the slot token to _its own_ box, and refuses a saved slot that names another one (so a tampered row cannot redirect them) unless you pass `allowOtherBoxes: true`, for storage you trust, such as when your box moved while slots were live. After a **relay restart**, nodes take up to about 15 seconds to reconnect, and until they do the relay does not know their slots: `isAlive()` can say `false` for a slot that is about to come back, so give it that long before deciding a browser is gone.
+`runId` is your own id for what the browser is for (a run, a task, a job). The box hands it back in `list()`, so `reap` can ask "is this still needed?" and release browsers a crash orphaned. **Reconnecting**: save `JSON.stringify(slot)`, later `box.slot(JSON.parse(saved))`, check `isAlive()`, and reconnect: the same pages are still there, which is how a service can hand a browser to a person and take it back. Two cautions. The saved slot holds the slot token, so store it like a secret. And it names the box it lives on: the client only sends its API key and the slot token to _its own_ box, and refuses a saved slot that names another one, so a tampered row cannot redirect them. If your box moved while slots were live, list the old address(es) in `allowOtherBoxes: ['https://old-box.example.com']` and only those are trusted too (spelled however, `https://Old-Box.example.com:443/` is the same box). `allowOtherBoxes: true` trusts any address, which is only for storage nobody else can write. After a **relay restart**, nodes take up to about 15 seconds to reconnect, and until they do the relay does not know their slots: `isAlive()` can say `false` for a slot that is about to come back, so give it that long before deciding a browser is gone.
 
 **Sharing one box between projects.** Give each project a `namespace`: slots are created as `<namespace>:<runId>`, and `list()` and `reap()` only see that project's. It is a naming convention, not access control: every holder of the API key can still reach every slot. Do not share a box between parties that should not trust each other.
 

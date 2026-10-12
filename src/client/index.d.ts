@@ -14,11 +14,13 @@ export interface BrowserBoxOptions {
    */
   namespace?: string
   /**
-   * Whether a stored slot (`box.slot(stored)`, `box.release(id, { url })`) may name a box other than this client's. Off by
+   * Which boxes other than this client's a stored slot (`box.slot(stored)`, `box.release(id, { url })`) may name. None by
    * default: the API key and slot tokens are sent to the box a slot names, so an address read back from storage that
-   * someone else could have written would be somewhere to send them. Turn it on for storage you trust.
+   * someone else could have written would be somewhere to send them. List the boxes your slots may have been made on
+   * (the address your service used before it moved, say). Addresses are compared however they are spelled. `true` allows
+   * any address, which is only safe for storage nobody else can write.
    */
-  allowOtherBoxes?: boolean
+  allowOtherBoxes?: boolean | string[]
   logger?: { warn?(message: string, fields?: Record<string, unknown>): void }
   fetch?: typeof fetch
   now?: () => number

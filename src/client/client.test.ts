@@ -364,6 +364,56 @@ test('client: a stored slot that names another box is not trusted with the API k
   assert.equal(trusting.slot(stored).url, stored.url)
 })
 
+test('client: allowOtherBoxes can name the boxes a stored slot may live on, and only those', async () => {
+  const OLD = 'https://old-box.example.com'
+  const box = fakeBox()
+  const service = client(box.impl, { allowOtherBoxes: [OLD, 'https://other-old.example.com/prefix'] })
+
+  // A listed box is trusted, however its address is spelled; the slot is made for that box.
+  assert.equal(service.slot({ slotId: 's1', token: 't1', url: OLD }).url, OLD)
+  assert.equal(
+    service.slot({ slotId: 's1', token: 't1', url: 'HTTPS://Old-Box.Example.com:443/' }).cdpUrl,
+    'wss://old-box.example.com/v1/cdp/s1',
+    'spelled however the address is, it is the same box'
+  )
+  assert.equal(
+    service.slot({ slotId: 's1', token: 't1', url: 'https://other-old.example.com/prefix/' }).url,
+    'https://other-old.example.com/prefix'
+  )
+  assert.equal(service.slot({ slotId: 's1', token: 't1' }).url, BOX, 'and this client’s own box still needs no listing')
+
+  // Anything else is not: the API key and the slot token go nowhere they were not told they may.
+  for (const url of [
+    'https://attacker.example.net',
+    `${OLD}:8443`,
+    'http://old-box.example.com',
+    'https://other-old.example.com',
+    'https://other-old.example.com/prefix/deeper'
+  ]) {
+    assert.throws(() => service.slot({ slotId: 's1', token: 't1', url }), /not on this client's box/, url)
+    await assert.rejects(() => service.release('s1', { url }), /not on this client's box/, url)
+  }
+  assert.equal(box.calls.length, 0, 'nothing was sent to any of them')
+
+  // A listed box really is where the call goes.
+  await service.release('s1', { url: OLD })
+  assert.equal(box.calls[0]!.url.href, `${OLD}/v1/slots/s1`)
+  assert.equal(box.calls[0]!.headers.Authorization, `Bearer ${API_KEY}`)
+
+  // An empty list trusts nobody; `true` still trusts anybody; a list that is not addresses is a mistake, found at once.
+  assert.throws(
+    () => client(box.impl, { allowOtherBoxes: [] }).slot({ slotId: 's1', token: 't1', url: OLD }),
+    /not on this client's box/
+  )
+  assert.equal(
+    client(box.impl, { allowOtherBoxes: true }).slot({ slotId: 's1', token: 't1', url: 'https://anywhere.example.org' })
+      .url,
+    'https://anywhere.example.org'
+  )
+  assert.throws(() => client(box.impl, { allowOtherBoxes: ['not a url'] }), /not a URL/)
+  assert.throws(() => client(box.impl, { allowOtherBoxes: ['ftp://old.example.com'] }), /http\(s\)/)
+})
+
 test('client: a stored slot is released at the box it names, with the API key', async () => {
   const box = fakeBox()
   const slot = await client(box.impl).acquire(acquireOptions('run-1'))

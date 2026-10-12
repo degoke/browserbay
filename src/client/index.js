@@ -79,18 +79,27 @@ export function createBrowserBox(options) {
   }
   const namespacePrefix = options.namespace ? `${options.namespace}:` : undefined
 
+  /** The same address however it is spelled: scheme and host in lower case, a default port dropped, no trailing slash. */
+  const canonical = (value) => trimSlashes(new URL(value).href)
+  const ownBox = canonical(boxUrl)
+  // Other boxes a stored slot may name (a box that moved while slots were live): listed, so each is checked up front.
+  const otherBoxes = new Set(
+    Array.isArray(options.allowOtherBoxes) ? options.allowOtherBoxes.map((url) => canonical(assertBoxUrl(url))) : []
+  )
+
   /**
    * The box a slot lives on. The API key (to release) and the slot token (to look it up) are sent there, so an address
-   * read back from storage is only used when it is this client's own box, unless `allowOtherBoxes` says a stored slot
-   * may name its own (a service whose box moved while slots were live, and whose storage it trusts).
+   * read back from storage is only used when it is this client's own box or one `allowOtherBoxes` lists (`true` allows
+   * any address, for storage nobody else can write).
    */
   function boxOf(url) {
     if (url === undefined) return boxUrl
     const base = assertBoxUrl(url)
-    if (base !== boxUrl && !options.allowOtherBoxes) {
+    const known = canonical(base)
+    if (known !== ownBox && options.allowOtherBoxes !== true && !otherBoxes.has(known)) {
       throw new TypeError(
         `This slot is on ${new URL(base).origin}, not on this client's box (${new URL(boxUrl).origin}). ` +
-          'Its credentials are only sent to the box this client was made for; set allowOtherBoxes to use it anyway.'
+          'Its credentials are only sent to the box this client was made for or one listed in allowOtherBoxes.'
       )
     }
     return base
