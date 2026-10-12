@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "rootDir": "src", "outDir": "dist" },
+  "include": ["src/relay", "src/protocol.d.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

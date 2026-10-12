@@ -1,0 +1,13 @@
+# One box on this machine: `BROWSERBOX_API_KEY=$(openssl rand -base64 24) docker compose up`
+# Point a project at http://localhost:8788 with that key. See the README for HTTPS and for adding nodes.
+services:
+  browserbox:
+    build: .
+    image: browserbox
+    init: true
+    restart: always
+    ports:
+      - '8788:8788'
+    environment:
+      BROWSERBOX_API_KEY: ${BROWSERBOX_API_KEY:?set BROWSERBOX_API_KEY, e.g. `openssl rand -base64 24`}
+      BROWSERBOX_MAX_CONTEXTS: ${BROWSERBOX_MAX_CONTEXTS:-5}

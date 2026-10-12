@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # typecheck, format check, build, and the unit tests (no browser needed: the hub is tested against a fake Chromium)
+      - run: pnpm run ci
+
+  # The same paths against real Chromium, then the whole box as processes. The hub's isolation tests live here.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:browser
+
+  # The images must build, and the relay image must answer.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: relay
+          load: true
+          tags: browserbox-relay:ci
+          cache-from: type=gha,scope=relay
+          cache-to: type=gha,mode=max,scope=relay
+      - name: The relay image starts and answers
+        run: |
+          docker run -d --name relay -p 8788:8788 \
+            -e BROWSERBOX_API_KEY=ci-api-key-0123456789 \
+            -e BROWSERBOX_ENROLLMENT_SECRETS=ci:0000000000000000000000000000000000000000000000000000000000000000 \
+            browserbox-relay:ci
+          for i in $(seq 1 20); do curl -fs http://localhost:8788/health && exit 0; sleep 1; done
+          docker logs relay
+          exit 1
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: box
+          tags: browserbox:ci
+          cache-from: type=gha,scope=box
+          cache-to: type=gha,mode=max,scope=box

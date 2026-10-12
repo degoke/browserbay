@@ -1,0 +1,557 @@
+import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import test from 'node:test'
+import { WebSocket, WebSocketServer } from 'ws'
+import { assertSecureRelayUrl, startAgent, type Agent } from './agent.mjs'
+import { createFakeChromium, type FakeChromium } from './fake-chromium.mjs'
+import { createCdpScope } from './scope.mjs'
+import { hashToken } from '../relay/registry.js'
+import { RELAY_PATHS, TOKEN_HEADER } from '../protocol.js'
+import { createRelayServer } from '../relay/server.js'
+
+const API_KEY = 'relay-api-key-0123456789'
+const SECRET = 'node-enrollment-secret-01'
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+async function until(condition: () => boolean | Promise<boolean>, what: string, timeoutMs = 3000) {
+  const start = Date.now()
+  while (!(await condition())) {
+    if (Date.now() - start > timeoutMs) assert.fail(`timed out waiting for ${what}`)
+    await wait(10)
+  }
+}
+
+/** A scope hub in front of a fake Chromium that has its own default-context page, as a real browser does. */
+async function startBrowser() {
+  const fake = createFakeChromium()
+  fake.createTarget()
+  const scope = createCdpScope({ upstream: { send: fake.receive } })
+  fake.onMessage(scope.onUpstreamMessage)
+  await scope.start()
+  await fake.flush()
+  return { fake, scope }
+}
+
+// ---- the agent against a relay that is just a script -------------------------------------------------------------
+
+type Frame = Record<string, any>
+
+async function startFakeRelay() {
+  const server = createServer()
+  const wss = new WebSocketServer({ noServer: true })
+  const received: Frame[] = []
+  const streams = new Map<string, WebSocket>()
+  const streamFrames: Array<{ streamId: string; text: string }> = []
+  const controls: WebSocket[] = []
+  server.on('upgrade', (request, socket, head) => {
+    const path = new URL(request.url ?? '/', 'http://relay').pathname
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      if (path === RELAY_PATHS.nodeConnect) {
+        controls.push(ws)
+        ws.on('message', (data) => received.push(JSON.parse(data.toString())))
+        return
+      }
+      const streamId = path.split('/').pop()!
+      streams.set(streamId, ws)
+      ws.on('message', (data, isBinary) =>
+        streamFrames.push({ streamId, text: `${isBinary ? 'binary:' : ''}${data.toString()}` })
+      )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const control = () => controls.at(-1)!
+  return {
+    url,
+    received,
+    streams,
+    streamFrames,
+    controls,
+    control,
+    send: (frame: Frame) => control().send(JSON.stringify(frame)),
+    of: (t: string) => received.filter((frame) => frame.t === t),
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const ws of wss.clients) ws.terminate()
+        server.close(() => resolve())
+      })
+  }
+}
+
+async function agentOnFakeRelay(overrides: Partial<Parameters<typeof startAgent>[0]> = {}) {
+  const browser = await startBrowser()
+  const relay = await startFakeRelay()
+  const warnings: string[] = []
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope: browser.scope,
+    maxContexts: 2,
+    reconnectMinMs: 20,
+    reconnectMaxMs: 60,
+    logger: { warn: (message) => warnings.push(message) },
+    ...overrides
+  })
+  await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+  relay.send({ t: 'welcome', heartbeatMs: 40 })
+  await agent.whenConnected()
+  return { ...browser, relay, agent, warnings }
+}
+
+const create = (slotId: string, extra: Frame = {}) => ({
+  t: 'context.create',
+  reqId: `req-${slotId}`,
+  slotId,
+  runId: `run-${slotId}`,
+  tokenHash: hashToken(`token-${slotId}`),
+  maxLifetimeSeconds: 600,
+  ...extra
+})
+
+test('the agent introduces itself, then heartbeats at the pace the relay sets', async () => {
+  const { relay, agent } = await agentOnFakeRelay()
+  try {
+    const [hello] = relay.of('hello')
+    assert.deepEqual(hello, { t: 'hello', secret: SECRET, nodeId: 'node-1', maxContexts: 2, version: 1, contexts: [] })
+    await until(() => relay.of('heartbeat').length >= 3, 'repeated heartbeats')
+    assert.deepEqual(relay.of('heartbeat')[0], { t: 'heartbeat', draining: false, contexts: [] })
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a context is created for a run, kept apart from the browser’s own profile, and reported with its token hash', async () => {
+  const { fake, relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1'))
+    await until(() => relay.of('context.created').length === 1, 'the confirmation')
+    assert.deepEqual(relay.of('context.created')[0], { t: 'context.created', reqId: 'req-s1' })
+    assert.equal(agent.contextCount(), 1)
+    assert.equal(fake.commands('Target.createBrowserContext')[0]!.params!.disposeOnDetach, false)
+
+    await until(() => relay.of('heartbeat').some((beat) => beat.contexts.length === 1), 'a heartbeat listing it')
+    const [report] = relay.of('heartbeat').at(-1)!.contexts
+    assert.deepEqual(
+      { slotId: report.slotId, runId: report.runId, tokenHash: report.tokenHash },
+      { slotId: 's1', runId: 'run-s1', tokenHash: hashToken('token-s1') }
+    )
+    assert.ok(!JSON.stringify(relay.received).includes('token-s1'), 'only the hash ever reaches the node')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a full or draining node refuses new contexts, and a release frees the room', async () => {
+  const { relay, agent } = await agentOnFakeRelay({ maxContexts: 1 })
+  try {
+    relay.send(create('s1'))
+    await until(() => relay.of('context.created').length === 1, 'the first context')
+    relay.send(create('s2'))
+    await until(() => relay.of('context.failed').length === 1, 'a refusal')
+    assert.deepEqual(relay.of('context.failed')[0], {
+      t: 'context.failed',
+      reqId: 'req-s2',
+      message: 'This node is full'
+    })
+
+    relay.send({ t: 'context.release', slotId: 's1' })
+    await until(() => agent.contextCount() === 0, 'the release')
+    relay.send(create('s3'))
+    await until(() => relay.of('context.created').length === 2, 'room again')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a context closes itself at its maximum lifetime, with no word from the relay', async () => {
+  const { fake, relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1', { maxLifetimeSeconds: 0.15 }))
+    await until(() => relay.of('context.created').length === 1, 'the context')
+    const contextId = [...fake.contexts.keys()].find((id) => id !== fake.DEFAULT_CONTEXT)!
+    await until(() => agent.contextCount() === 0, 'the lifetime to end')
+    assert.equal(fake.contexts.has(contextId), false, 'the browser context itself was disposed')
+    await until(() => relay.of('heartbeat').at(-1)?.contexts.length === 0, 'a heartbeat without it')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a stream serves one client of one run, and ends with it', async () => {
+  const { fake, scope, relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send({ t: 'stream.open', streamId: 'st-unknown', slotId: 's-none' })
+    await until(() => relay.of('stream.failed').length === 1, 'a refusal for an unknown context')
+    assert.equal(relay.of('stream.failed')[0]!.streamId, 'st-unknown')
+
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    relay.send({ t: 'stream.open', streamId: 'st-1', slotId: 's1' })
+    await until(() => relay.streams.has('st-1'), 'the agent to dial the stream')
+    const stream = relay.streams.get('st-1')!
+    const replies: Frame[] = []
+    stream.on('message', (data, isBinary) => {
+      assert.equal(isBinary, false, 'DevTools messages stay text frames')
+      replies.push(JSON.parse(data.toString()))
+    })
+    stream.send(JSON.stringify({ id: 1, method: 'Browser.getVersion' }))
+    stream.send(JSON.stringify({ id: 2, method: 'Target.getBrowserContexts' }))
+    await until(() => replies.length === 2, 'both replies')
+    // Replies are matched by id: the hub answers some commands itself, ahead of ones that go to Chromium.
+    const byId = (id: number) => replies.find((reply) => reply.id === id)!
+    assert.equal(byId(1).result.product, 'FakeChrome/1')
+    assert.deepEqual(byId(2).result.browserContextIds, [
+      [...fake.contexts.keys()].find((id) => id !== fake.DEFAULT_CONTEXT)
+    ])
+
+    // Ending the stream releases what the client held, and the run's context stays.
+    const closed = new Promise((resolve) => stream.once('close', resolve))
+    stream.close(1000)
+    await closed
+    assert.equal(agent.contextCount(), 1)
+    assert.ok(scope.hasRun('s1'))
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('losing the browser ends every stream with a code a WebSocket client can send and receive', async () => {
+  const { scope, relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    relay.send({ t: 'stream.open', streamId: 'st-1', slotId: 's1' })
+    await until(() => relay.streams.has('st-1'), 'the stream')
+    const closed = new Promise<number>((resolve) => relay.streams.get('st-1')!.once('close', (code) => resolve(code)))
+    scope.onUpstreamClosed()
+    // The scope says 1011; the built-in WebSocket client may only send 1000 or 3000-4999.
+    assert.equal(await closed, 4500)
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a node that loses the relay reconnects, and says which contexts it still holds', async () => {
+  const { relay, agent, warnings } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    relay.control().close(1012, 'restart')
+    await until(() => relay.of('hello').length === 2, 'a second hello')
+    const hello = relay.of('hello')[1]!
+    assert.deepEqual(
+      hello.contexts.map((context: Frame) => context.slotId),
+      ['s1']
+    )
+    assert.equal(agent.contextCount(), 1, 'nothing was closed because the relay went away')
+
+    // A rejected enrollment is reported, and the node keeps trying rather than giving up for good.
+    relay.control().close(4401, 'Unauthorized')
+    await until(() => warnings.includes('The relay rejected this node’s enrollment secret'), 'the warning')
+    await until(() => relay.of('hello').length === 3, 'a third hello')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('draining stops new runs and resolves once the current ones are gone', async () => {
+  const { relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    const draining = agent.drain(5000)
+    await until(() => relay.of('heartbeat').some((beat) => beat.draining === true), 'the draining flag')
+    relay.send(create('s2'))
+    await until(() => relay.of('context.failed').length === 1, 'a refusal')
+    assert.equal(relay.of('context.failed')[0]!.message, 'This node is draining')
+
+    let done = false
+    void draining.then(() => (done = true))
+    await wait(60)
+    assert.equal(done, false, 'still waiting for the run that is left')
+    relay.send({ t: 'context.release', slotId: 's1' })
+    await draining
+    assert.equal(agent.contextCount(), 0)
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+// ---- the real agent against the real relay: the contract between them, with a fake Chromium underneath ---------------
+
+async function startPool(port = 0) {
+  const relay = createRelayServer({
+    apiKey: API_KEY,
+    enrollmentSecrets: [{ id: 'test', sha256: hashToken(SECRET) }]
+  })
+  const bound = await relay.listen(port, '127.0.0.1')
+  return { relay, port: bound, base: `http://127.0.0.1:${bound}`, wsBase: `ws://127.0.0.1:${bound}` }
+}
+
+async function newClient(wsBase: string, slotId: string, token: string) {
+  const socket = new WebSocket(`${wsBase}${RELAY_PATHS.cdp(slotId)}`, { headers: { [TOKEN_HEADER]: token } })
+  const inbox: Frame[] = []
+  let nextId = 1
+  socket.on('error', () => undefined)
+  socket.on('message', (data) => inbox.push(JSON.parse(data.toString())))
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve())
+    socket.once('error', reject)
+  })
+  return {
+    socket,
+    inbox,
+    closed: new Promise<number>((resolve) => socket.once('close', (code) => resolve(code))),
+    async call(method: string, params: object = {}, sessionId?: string) {
+      const id = nextId++
+      socket.send(JSON.stringify({ id, method, params, sessionId }))
+      await until(() => inbox.some((frame) => frame.id === id), `the answer to ${method}`)
+      return inbox.find((frame) => frame.id === id)!
+    }
+  }
+}
+
+const slotOver = async (base: string, runId = 'run-1') => {
+  const response = await fetch(`${base}${RELAY_PATHS.slots}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ runId, maxLifetimeSeconds: 600 })
+  })
+  assert.equal(response.status, 201)
+  return (await response.json()) as { slotId: string; token: string; nodeId: string }
+}
+
+async function nodeOn(
+  base: string,
+  fake: FakeChromium,
+  scope: ReturnType<typeof createCdpScope>,
+  id = 'n1'
+): Promise<Agent> {
+  const agent = startAgent({
+    relayUrl: base,
+    enrollmentSecret: SECRET,
+    nodeId: id,
+    scope,
+    maxContexts: 2,
+    reconnectMinMs: 20,
+    reconnectMaxMs: 60
+  })
+  await agent.whenConnected()
+  assert.ok(fake)
+  return agent
+}
+
+test('end to end: a slot on a node, reached through the relay, with its browser kept apart from every other run’s', async () => {
+  const { fake, scope } = await startBrowser()
+  const { relay, base, wsBase } = await startPool()
+  const agent = await nodeOn(base, fake, scope)
+  try {
+    const a = await slotOver(base, 'run-a')
+    const b = await slotOver(base, 'run-b')
+    assert.equal(agent.contextCount(), 2)
+
+    const clientA = await newClient(wsBase, a.slotId, a.token)
+    const clientB = await newClient(wsBase, b.slotId, b.token)
+    assert.equal((await clientA.call('Browser.getVersion')).result.product, 'FakeChrome/1')
+
+    // Each run's client is attached to its own context's tabs only.
+    await clientA.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+    await clientB.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+    const pageA = (await clientA.call('Target.createTarget', { url: 'https://a.example/' })).result.targetId as string
+    const pageB = (await clientB.call('Target.createTarget', { url: 'https://b.example/' })).result.targetId as string
+    assert.notEqual(fake.targets.get(pageA)!.browserContextId, fake.targets.get(pageB)!.browserContextId)
+    const listedA = (await clientA.call('Target.getTargets')).result.targetInfos as Array<{ targetId: string }>
+    assert.deepEqual(
+      listedA.map((info) => info.targetId),
+      [pageA]
+    )
+    const refused = await clientA.call('Target.closeTarget', { targetId: pageB })
+    assert.equal(refused.error.code, -32602)
+    assert.ok(fake.targets.has(pageB), 'run B’s tab was not touched')
+
+    // Releasing one run ends its connections and disposes its context, and leaves the other alone.
+    await fetch(`${base}${RELAY_PATHS.slot(a.slotId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${API_KEY}` }
+    })
+    assert.equal(await clientA.closed, 4001)
+    await until(() => agent.contextCount() === 1, 'the node to close the context')
+    assert.equal(fake.targets.has(pageA), false)
+    assert.equal((await clientB.call('Browser.getVersion')).result.product, 'FakeChrome/1')
+    clientB.socket.close()
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('end to end: a relay that restarts finds its runs again, and the run tokens still work', async () => {
+  const { fake, scope } = await startBrowser()
+  const first = await startPool()
+  const agent = await nodeOn(first.base, fake, scope)
+  try {
+    const slot = await slotOver(first.base)
+    const before = await newClient(first.wsBase, slot.slotId, slot.token)
+    await before.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+    const page = (await before.call('Target.createTarget', { url: 'https://a.example/' })).result.targetId as string
+    before.socket.close()
+    await first.relay.close()
+    assert.equal(agent.contextCount(), 1, 'the node kept the run’s context while the relay was down')
+
+    // Same address, empty table: the agent reconnects and reports what it holds.
+    const second = await startPool(first.port)
+    try {
+      await until(async () => {
+        const status = await fetch(`${second.base}${RELAY_PATHS.slot(slot.slotId)}`, {
+          headers: { [TOKEN_HEADER]: slot.token }
+        })
+        return status.status === 200
+      }, 'the new relay to adopt the slot')
+      const after = await newClient(second.wsBase, slot.slotId, slot.token)
+      await after.call('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+      const targets = (await after.call('Target.getTargets')).result.targetInfos as Array<{ targetId: string }>
+      assert.deepEqual(
+        targets.map((info) => info.targetId),
+        [page],
+        'the same tab is there for the next client'
+      )
+      after.socket.close()
+    } finally {
+      await second.relay.close()
+    }
+  } finally {
+    await agent.close()
+  }
+})
+
+test('end to end: a full pool refuses another run without ever reaching the browser', async () => {
+  const { fake, scope } = await startBrowser()
+  const { relay, base } = await startPool()
+  const agent = await nodeOn(base, fake, scope)
+  try {
+    await slotOver(base, 'run-1')
+    await slotOver(base, 'run-2')
+    const full = await fetch(`${base}${RELAY_PATHS.slots}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ runId: 'run-3', maxLifetimeSeconds: 600, waitMs: 0 })
+    })
+    assert.equal(full.status, 503)
+    assert.equal(fake.commands('Target.createBrowserContext').length, 2, 'the third run never reached the browser')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+// ---- hardening: large replies, a stalled browser, plain-http relays, protocol versions -----------------------------
+
+test('one very large reply does not make the node think a healthy stream is too slow', async () => {
+  const { fake, relay, agent } = await agentOnFakeRelay()
+  try {
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    const contextId = [...fake.contexts.keys()].find((id) => id !== fake.DEFAULT_CONTEXT)!
+    // A tab with a 20 MB address makes Target.getTargets answer with about 20 MB, above the node's 16 MiB buffer cap.
+    fake.createTarget({ browserContextId: contextId, url: `https://example.com/${'x'.repeat(20_000_000)}` })
+    await fake.flush()
+    relay.send({ t: 'stream.open', streamId: 'st-1', slotId: 's1' })
+    await until(() => relay.streams.has('st-1'), 'the stream')
+
+    const stream = relay.streams.get('st-1')!
+    const sizes = new Map<number, number>()
+    stream.on('message', (data) => sizes.set(JSON.parse(data.toString()).id, data.toString().length))
+    stream.send(JSON.stringify({ id: 1, method: 'Target.getTargets' }))
+    stream.send(JSON.stringify({ id: 2, method: 'Browser.getVersion' }))
+    stream.send(JSON.stringify({ id: 3, method: 'Target.getBrowserContexts' }))
+    await until(() => sizes.size === 3, 'all three replies', 10_000)
+    assert.ok(sizes.get(1)! > 20_000_000)
+    assert.equal(stream.readyState, WebSocket.OPEN, 'the stream was not closed for being slow')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a browser that stops answering fails a create instead of holding its slot for ever', async () => {
+  const relay = await startFakeRelay()
+  const scope = createCdpScope({ upstream: { send() {} }, requestTimeoutMs: 30 })
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope,
+    maxContexts: 1,
+    reconnectMinMs: 20,
+    reconnectMaxMs: 60
+  })
+  try {
+    await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+    relay.send({ t: 'welcome', heartbeatMs: 40, version: 1 })
+    await agent.whenConnected()
+
+    relay.send(create('s1'))
+    await until(() => relay.of('context.failed').length === 1, 'the first failure')
+    relay.send(create('s2'))
+    await until(() => relay.of('context.failed').length === 2, 'the second failure')
+    assert.deepEqual(
+      relay.of('context.failed').map((frame) => frame.message),
+      ['The browser could not create a context', 'The browser could not create a context'],
+      'the second create reached the browser too: the first one did not keep the node’s only slot'
+    )
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a node will not send its enrollment secret over plain http to another machine', () => {
+  for (const fine of [
+    'https://relay.example.com',
+    'wss://relay.example.com/prefix',
+    'http://localhost:8788',
+    'http://127.0.0.1:8788',
+    'ws://[::1]:8788',
+    'http://relay.localhost'
+  ]) {
+    assert.doesNotThrow(() => assertSecureRelayUrl(fine), fine)
+  }
+  for (const refused of [
+    'http://relay.example.com',
+    'ws://relay.example.com',
+    'http://10.0.0.5:8788',
+    'ftp://relay.example.com'
+  ]) {
+    assert.throws(() => assertSecureRelayUrl(refused), /https/, refused)
+  }
+  assert.throws(
+    () =>
+      startAgent({ relayUrl: 'http://relay.example.com', enrollmentSecret: SECRET, nodeId: 'n', scope: {} as never }),
+    /https/,
+    'and starting an agent for one is refused before anything connects'
+  )
+})
+
+test('a relay that speaks another protocol version is warned about, and so is being refused for it', async () => {
+  const { relay, agent, warnings } = await agentOnFakeRelay()
+  try {
+    const mismatch = () => warnings.filter((message) => message.includes('different protocol version')).length
+    relay.send({ t: 'welcome', heartbeatMs: 40, version: 99 })
+    await until(() => mismatch() === 1, 'a warning for the relay’s version')
+    relay.control().close(4426, 'Unsupported protocol version')
+    await until(() => mismatch() === 2, 'a warning for being refused')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})

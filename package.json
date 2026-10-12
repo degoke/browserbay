@@ -1,0 +1,54 @@
+{
+  "name": "browserbox",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted browsers for AI agents and automation: a relay, browser nodes that dial out to it, and a client. Deploy it anywhere, point any project at it.",
+  "type": "module",
+  "packageManager": "pnpm@10.13.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "browserbox": "./bin/browserbox.mjs"
+  },
+  "exports": {
+    "./client": {
+      "types": "./src/client/index.d.ts",
+      "default": "./src/client/index.js"
+    },
+    "./protocol": {
+      "types": "./src/protocol.d.ts",
+      "default": "./src/protocol.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "!src/**/*.test.*",
+    "!src/node/fake-chromium.*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-protocol.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm build && node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.mjs\"",
+    "test:browser": "pnpm build && PLAYWRIGHT_BROWSER_TESTS=1 node --import tsx --test --test-concurrency=1 \"test/**/*.browser.test.ts\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "ci": "pnpm typecheck && pnpm format:check && pnpm test",
+    "start": "node bin/browserbox.mjs start",
+    "docker:build": "docker build -t browserbox ."
+  },
+  "dependencies": {
+    "ws": "^8.22.0",
+    "zod": "^3.24.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.2",
+    "playwright": "1.62.1",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
