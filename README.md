@@ -34,6 +34,8 @@ Or with Compose, from a checkout: `export BROWSERBOX_API_KEY=$(openssl rand -bas
 pnpm add github:degoke/browserbox#v0.1.0
 ```
 
+If you install it inside a Docker build, pin a **commit** instead of the tag (`github:degoke/browserbox#<commit>`): a tag is looked up with `git ls-remote`, which a slim Node image does not have, and a full commit hash needs no lookup (and cannot be moved). The repository is public, so no credentials are needed either way.
+
 ```js
 import { chromium } from 'playwright'
 import { createBrowserBox } from 'browserbox/client'
