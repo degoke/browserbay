@@ -185,19 +185,22 @@ test(
       await driver.detach()
 
       const viewer = await watch(slot.cdpUrl, slot.headers)
-      await until(() => viewer.frames.length > 0, 'the first frame')
-      const seconds = 5
-      const startFrames = viewer.frames.length
-      const startBytes = viewer.frames.reduce((sum, frame) => sum + frame.length, 0)
-      await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
-      const frames = viewer.frames.length - startFrames
-      const bytes = viewer.frames.reduce((sum, frame) => sum + frame.length, 0) - startBytes
-      console.log(
-        `watching a slot (loopback, worst-case canvas): ${(frames / seconds).toFixed(1)} frames/s, ` +
-          `${(bytes / seconds / 1024).toFixed(0)} KiB/s, ${(bytes / Math.max(frames, 1) / 1024).toFixed(0)} KiB/frame`
-      )
-      assert.ok(frames >= seconds, 'frames kept flowing')
-      viewer.close()
+      try {
+        await until(() => viewer.frames.length > 0, 'the first frame')
+        const seconds = 5
+        const startFrames = viewer.frames.length
+        const startBytes = viewer.frames.reduce((sum, frame) => sum + frame.length, 0)
+        await new Promise((resolve) => setTimeout(resolve, seconds * 1000))
+        const frames = viewer.frames.length - startFrames
+        const bytes = viewer.frames.reduce((sum, frame) => sum + frame.length, 0) - startBytes
+        console.log(
+          `watching a slot (loopback, worst-case canvas): ${(frames / seconds).toFixed(1)} frames/s, ` +
+            `${(bytes / seconds / 1024).toFixed(0)} KiB/s, ${(bytes / Math.max(frames, 1) / 1024).toFixed(0)} KiB/frame`
+        )
+        assert.ok(frames >= seconds, 'frames kept flowing')
+      } finally {
+        viewer.close()
+      }
       await slot.release()
     } finally {
       server.close()

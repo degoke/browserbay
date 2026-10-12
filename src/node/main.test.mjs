@@ -52,10 +52,15 @@ test('node settings: what the relay would refuse is refused here, at startup, wi
   assert.equal(parseNodeSettings({ BROWSERBOX_NODE_ID: 'eu-west_1.node' }).nodeId, 'eu-west_1.node')
   assert.ok(/^[\w.-]{1,100}$/.test(parseNodeSettings({}).nodeId), 'the default, from the hostname, always fits')
 
-  for (const value of ['abc', '-5', '', 'Infinity']) {
+  for (const value of ['abc', '-5', 'Infinity', '1e999']) {
     assert.throws(() => parseNodeSettings({ BROWSERBOX_DRAIN_SECONDS: value }), /BROWSERBOX_DRAIN_SECONDS/, value)
   }
   assert.equal(parseNodeSettings({ BROWSERBOX_DRAIN_SECONDS: '0' }).drainSeconds, 0, 'zero is "do not wait"')
+  // Empty or blank is "not set", like an empty BROWSERBOX_MAX_CONTEXTS: platforms and Compose pass empty variables.
+  for (const value of ['', '   ']) {
+    assert.equal(parseNodeSettings({ BROWSERBOX_DRAIN_SECONDS: value }).drainSeconds, 120, JSON.stringify(value))
+  }
+  assert.equal(parseNodeSettings({ BROWSERBOX_MAX_CONTEXTS: '' }).maxContexts, 5)
 })
 
 test('a stand-alone node needs the relay address and a long enough enrollment secret', () => {

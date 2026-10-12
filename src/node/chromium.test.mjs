@@ -44,6 +44,33 @@ test('chromium environment: what a browser needs passes, the box’s and the pla
   assert.deepEqual(chromiumEnv({}), {}, 'nothing in, nothing out')
 })
 
+test('chromium environment: an operator can pass named variables through, but never the box’s own', () => {
+  const env = chromiumEnv({
+    PATH: '/usr/bin',
+    LIBGL_ALWAYS_SOFTWARE: '1',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+    CUSTOM_CA_BUNDLE: '/etc/ca.pem',
+    DATABASE_URL: 'postgres://user:password@host/db',
+    BROWSERBOX_API_KEY: 'the-api-key-0123456789',
+    BROWSERBOX_ENROLLMENT_SECRET: 'the-enrollment-secret',
+    BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH:
+      ' LIBGL_ALWAYS_SOFTWARE, DBUS_SESSION_BUS_ADDRESS ,CUSTOM_CA_BUNDLE,BROWSERBOX_API_KEY,BROWSERBOX_ENROLLMENT_SECRET,not a name,'
+  })
+  assert.deepEqual(Object.keys(env).sort(), [
+    'CUSTOM_CA_BUNDLE',
+    'DBUS_SESSION_BUS_ADDRESS',
+    'LIBGL_ALWAYS_SOFTWARE',
+    'PATH'
+  ])
+  assert.ok(!JSON.stringify(env).includes('0123456789'), 'the API key is never passed, even when it is listed')
+  assert.ok(!('DATABASE_URL' in env), 'and what is not listed stays out')
+  assert.deepEqual(
+    chromiumEnv({ BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH: 'X' }),
+    {},
+    'a listed name that is not set adds nothing'
+  )
+})
+
 test('chromium command line: DevTools on a pipe, no port; sandbox and headless as asked', () => {
   const args = chromiumArgs({ profileDir: '/p' })
   assert.ok(args.includes('--remote-debugging-pipe'))

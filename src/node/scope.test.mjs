@@ -172,6 +172,19 @@ test('downloads are denied for the run’s context, and a client cannot choose w
   )
 })
 
+test('two creates for the same slot at once make one context, not two with one of them lost', async () => {
+  const { fake, scope } = await setup()
+  const results = await Promise.allSettled([scope.createRun('same'), scope.createRun('same')])
+  assert.deepEqual(results.map((result) => result.status).sort(), ['fulfilled', 'rejected'])
+  assert.match(String(results.find((result) => result.status === 'rejected').reason), /already has a browser context/)
+  assert.equal(fake.commands('Target.createBrowserContext').length, 1, 'only one context was made, so none leaks')
+
+  // The slot can still be released and made again afterwards.
+  await scope.disposeRun('same')
+  await scope.createRun('same')
+  assert.equal(fake.commands('Target.createBrowserContext').length, 2)
+})
+
 test('a run’s context is denied downloads from the start, without its client having to ask', async () => {
   const { fake, scope } = await setup()
   const { contextId } = await scope.createRun('a')

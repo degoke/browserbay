@@ -13,15 +13,13 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { ConfigError } from '../protocol.js'
 import { assertSecureRelayUrl, startAgent } from './agent.mjs'
 import { chromiumArgs, chromiumEnv, findChromium } from './chromium.mjs'
 import { createPipeUpstream } from './pipe-upstream.mjs'
 import { createCdpScope } from './scope.mjs'
 
-/** A setting the operator has to fix (as opposed to a browser that failed to start). Callers exit with status 2. */
-export class ConfigError extends Error {
-  name = 'ConfigError'
-}
+export { ConfigError }
 
 const CHROMIUM_START_TIMEOUT_MS = 30_000
 const CHROMIUM_STOP_GRACE_MS = 3000
@@ -121,11 +119,13 @@ export async function startBrowserNode(options) {
   agent
     .whenConnected(CONNECT_REPORT_MS)
     .then(() => logger.info?.(`node ${nodeId} ready: up to ${maxContexts} slots, relay ${new URL(relayUrl).origin}`))
-    .catch(() =>
+    .catch(() => {
+      // Closed before it ever joined is not worth a warning: the node was told to stop.
+      if (stopping) return
       logger.warn?.(
         `node ${nodeId} is running but not yet accepted by the relay at ${new URL(relayUrl).origin}: still trying (check the relay address and the enrollment secret)`
       )
-    )
+    })
 
   return {
     exited,

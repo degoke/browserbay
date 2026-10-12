@@ -4,9 +4,17 @@ export declare const TOKEN_HEADER: 'x-browserbox-token'
 
 export declare const NODE_PROTOCOL_VERSION: 1
 
+/** Letters, digits, `_`, `.` and `-`: the one rule for a name. */
+export declare const NAME_PATTERN: RegExp
+
 export declare const NODE_LIMITS: {
   readonly maxContexts: 100
   readonly nodeIdPattern: RegExp
+}
+
+/** A setting the operator has to fix. Recognise it by `name === 'ConfigError'`. */
+export declare class ConfigError extends Error {
+  name: 'ConfigError'
 }
 
 export declare const SLOT_LIMITS: {
@@ -26,6 +34,7 @@ export declare const RELAY_PATHS: {
 }
 
 export declare const CLOSE: {
+  readonly invalidHello: 4400
   readonly unauthorized: 4401
   readonly unsupportedVersion: 4426
   readonly helloTimeout: 4408

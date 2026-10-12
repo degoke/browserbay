@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from 'node:crypto'
+import { NAME_PATTERN } from '../src/protocol.js'
 
 const HELP = `browserbox: self-hosted browsers for AI agents and automation
 
@@ -24,7 +25,8 @@ const isRelayMissing = (error) => error?.code === 'ERR_MODULE_NOT_FOUND' && /dis
 try {
   await dispatch()
 } catch (error) {
-  // A bad setting should read as a sentence, not a stack trace; and as status 2, like a node's.
+  // A bad setting should read as a sentence, not a stack trace; and as status 2. Recognised by name, not instanceof:
+  // the compiled relay has its own copy of ConfigError (dist/protocol.js), so the two are different classes.
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(error?.name === 'ConfigError' ? 2 : 1)
 }
@@ -51,7 +53,7 @@ async function dispatch() {
     }
     case 'secret': {
       const name = args[0] ?? 'node'
-      if (!/^[\w.-]+$/.test(name)) {
+      if (!NAME_PATTERN.test(name)) {
         console.error(
           'The name may only contain letters, digits, "_", "." and "-" (it is what the relay calls the node in its logs).'
         )

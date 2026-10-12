@@ -110,31 +110,37 @@ export async function launchChromium() {
     ],
     { stdio: 'ignore' }
   )
-  // Chromium picks its own free port and writes it, then the browser's DevTools path, to DevToolsActivePort.
-  let webSocketDebuggerUrl = ''
-  await until(
-    async () => {
-      try {
-        const [port, path] = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')
-        if (!port || !path) return false
-        webSocketDebuggerUrl = `ws://127.0.0.1:${port}${path}`
-        return true
-      } catch {
-        return false
-      }
-    },
-    'Chromium to start',
-    60_000
-  )
-  return {
-    webSocketDebuggerUrl,
-    async stop() {
+  const stop = async () => {
+    if (child.exitCode === null && child.signalCode === null) {
       const exited = new Promise((resolve) => child.once('exit', resolve))
       child.kill('SIGKILL')
       await exited
-      await removeProfile(profile)
     }
+    await removeProfile(profile)
   }
+  // Chromium picks its own free port and writes it, then the browser's DevTools path, to DevToolsActivePort.
+  let webSocketDebuggerUrl = ''
+  try {
+    await until(
+      async () => {
+        try {
+          const [port, path] = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')
+          if (!port || !path) return false
+          webSocketDebuggerUrl = `ws://127.0.0.1:${port}${path}`
+          return true
+        } catch {
+          return false
+        }
+      },
+      'Chromium to start',
+      60_000
+    )
+  } catch (error) {
+    // A Chromium that never came up is still running and still owns its profile: do not leave either behind.
+    await stop()
+    throw error
+  }
+  return { webSocketDebuggerUrl, stop }
 }
 
 // ---- driving a browser the way a client does -------------------------------------------------------------------
@@ -188,16 +194,25 @@ export async function connect(
  */
 export async function watch(endpoint: string, headers?: Record<string, string>) {
   const raw = rawSocket(endpoint, headers)
-  await raw.opened
-  const { targetInfos } = (await raw.send('Target.getTargets')).result as {
-    targetInfos: Array<{ targetId: string; type: string }>
+  let sessionId = ''
+  try {
+    await raw.opened
+    const { targetInfos } = (await raw.send('Target.getTargets')).result as {
+      targetInfos: Array<{ targetId: string; type: string }>
+    }
+    const target = targetInfos.find((info) => info.type === 'page')
+    assert.ok(target, 'the slot shows a page to watch')
+    sessionId = (
+      (await raw.send('Target.attachToTarget', { targetId: target.targetId, flatten: true })).result as {
+        sessionId: string
+      }
+    ).sessionId
+    await raw.send('Page.enable', {}, sessionId)
+    await raw.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 900 }, sessionId)
+  } catch (error) {
+    raw.kill()
+    throw error
   }
-  const target = targetInfos.find((info) => info.type === 'page')
-  assert.ok(target, 'the slot shows a page to watch')
-  const { sessionId } = (await raw.send('Target.attachToTarget', { targetId: target.targetId, flatten: true }))
-    .result as { sessionId: string }
-  await raw.send('Page.enable', {}, sessionId)
-  await raw.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 900 }, sessionId)
 
   const frames: Buffer[] = []
   let handled = 0
@@ -209,6 +224,7 @@ export async function watch(endpoint: string, headers?: Record<string, string>) 
       void raw.send('Page.screencastFrameAck', { sessionId: event.params!.sessionId }, sessionId)
     }
   }, 20)
+  pump.unref()
 
   const send = (method: string, params: object) => raw.send(method, params, sessionId)
   const click = async (x: number, y: number) => {
@@ -246,22 +262,28 @@ export async function watchDriveReattach(endpoint: string, headers?: Record<stri
 
     // 2. A person watches it: frames arrive, and they are JPEGs.
     const viewer = await watch(endpoint, headers)
-    await until(() => viewer.frames.length > 0, 'the first frame')
-    assert.deepEqual([...viewer.frames[0]!.subarray(0, 2)], [0xff, 0xd8], 'the frame is a JPEG')
+    try {
+      await until(() => viewer.frames.length > 0, 'the first frame')
+      assert.deepEqual([...viewer.frames[0]!.subarray(0, 2)], [0xff, 0xd8], 'the frame is a JPEG')
 
-    // 3. They click the button, then click the field and type and paste.
-    await viewer.click(200, 130)
-    await viewer.click(250, 220)
-    await viewer.type('hi')
-    await viewer.paste(' there')
-    viewer.close()
+      // 3. They click the button, then click the field and type and paste.
+      await viewer.click(200, 130)
+      await viewer.click(250, 220)
+      await viewer.type('hi')
+      await viewer.paste(' there')
+    } finally {
+      viewer.close()
+    }
 
     // 4. The service comes back to the same browser and sees what they did.
     const second = await connect(endpoint, { headers })
-    assert.equal(new URL(second.page.url()).origin, origin, 'the same page is there')
-    await until(async () => (await second.page.textContent('#out')) === 'clicked', 'the click to land')
-    await until(async () => (await second.page.inputValue('#i')) === 'hi there', 'the typing and paste to land')
-    await second.detach()
+    try {
+      assert.equal(new URL(second.page.url()).origin, origin, 'the same page is there')
+      await until(async () => (await second.page.textContent('#out')) === 'clicked', 'the click to land')
+      await until(async () => (await second.page.inputValue('#i')) === 'hi there', 'the typing and paste to land')
+    } finally {
+      await second.detach()
+    }
   } finally {
     server.close()
   }

@@ -100,6 +100,8 @@ export function startAgent({
   let helloAcknowledged = false
   let lastConnectionError = ''
   const waiters = new Set()
+  /** Callers of whenConnected: settled by the welcome, by close(), or by their own timeout. */
+  const connectWaiters = new Set()
 
   const reports = () =>
     [...contexts.values()].map(({ slotId, runId, tokenHash, createdAt }) => ({ slotId, runId, tokenHash, createdAt }))
@@ -122,6 +124,7 @@ export function startAgent({
     if (closing) return
     const socket = new WebSocketImpl(urlFor(RELAY_PATHS.nodeConnect))
     control = socket
+    lastConnectionError = ''
     socket.addEventListener('open', () => {
       sendControl({
         t: 'hello',
@@ -147,8 +150,7 @@ export function startAgent({
     helloAcknowledged = false
     clearInterval(heartbeatTimer)
     if (closing) return
-    const reason = String(event?.reason ?? '')
-    if (event?.code === CLOSE.unauthorized && /invalid hello/i.test(reason)) {
+    if (event?.code === CLOSE.invalidHello) {
       log('warn', 'The relay refused this node: its id or slot count is not valid for this relay', {
         nodeId,
         maxContexts
@@ -191,6 +193,7 @@ export function startAgent({
           log('warn', 'The relay speaks a different protocol version than this node', { relay: message.version })
         }
         helloAcknowledged = true
+        for (const waiter of [...connectWaiters]) waiter.resolve()
         attempt = 0
         clearInterval(heartbeatTimer)
         heartbeatTimer = setInterval(sendHeartbeat, message.heartbeatMs || heartbeatMs)
@@ -297,16 +300,18 @@ export function startAgent({
     whenConnected(timeoutMs = 10_000) {
       if (helloAcknowledged) return Promise.resolve()
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          clearInterval(poll)
-          reject(new Error('The relay did not accept this node in time'))
-        }, timeoutMs)
-        const poll = setInterval(() => {
-          if (!helloAcknowledged) return
+        const settle = (finish) => {
           clearTimeout(timer)
-          clearInterval(poll)
-          resolve()
-        }, 20)
+          connectWaiters.delete(waiter)
+          finish()
+        }
+        const waiter = { resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) }
+        const timer = setTimeout(
+          () => waiter.reject(new Error('The relay did not accept this node in time')),
+          timeoutMs
+        )
+        timer.unref?.()
+        connectWaiters.add(waiter)
       })
     },
     contextCount: () => contexts.size,
@@ -336,6 +341,7 @@ export function startAgent({
       if (control?.readyState === OPEN) control.close(1000, 'The node is stopping')
       control = null
       for (const resolve of [...waiters]) resolve()
+      for (const waiter of [...connectWaiters]) waiter.reject(new Error('The agent was closed'))
     }
   }
 }

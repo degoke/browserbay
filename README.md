@@ -135,17 +135,18 @@ When you want browsers on several machines, run **one relay** and any number of 
      ghcr.io/degoke/browserbox node
    ```
 
-   | Variable                         | Default          | Meaning                                                                                                                                           |
-   | -------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | `BROWSERBOX_RELAY_URL`           | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it. |
-   | `BROWSERBOX_ENROLLMENT_SECRET`   | —                | **Required**, at least 16 characters.                                                                                                             |
-   | `BROWSERBOX_NODE_ID`             | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                 |
-   | `BROWSERBOX_MAX_CONTEXTS`        | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                          |
-   | `BROWSERBOX_DRAIN_SECONDS`       | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more.                                                                           |
-   | `BROWSERBOX_CHROMIUM_SANDBOX`    | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                    |
-   | `BROWSERBOX_HEADLESS`            | `true`           | `false` for a headful browser (needs a display).                                                                                                  |
-   | `BROWSERBOX_PROFILE_DIR`         | a fresh temp dir | Chromium's profile.                                                                                                                               |
-   | `BROWSERBOX_CHROMIUM_EXECUTABLE` | the image's      | A Chromium other than the one in the image.                                                                                                       |
+   | Variable                              | Default          | Meaning                                                                                                                                           |
+   | ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | `BROWSERBOX_RELAY_URL`                | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it. |
+   | `BROWSERBOX_ENROLLMENT_SECRET`        | —                | **Required**, at least 16 characters.                                                                                                             |
+   | `BROWSERBOX_NODE_ID`                  | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                 |
+   | `BROWSERBOX_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                          |
+   | `BROWSERBOX_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more (empty means the default).                                                 |
+   | `BROWSERBOX_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                    |
+   | `BROWSERBOX_HEADLESS`                 | `true`           | `false` for a headful browser (needs a display).                                                                                                  |
+   | `BROWSERBOX_PROFILE_DIR`              | a fresh temp dir | Chromium's profile.                                                                                                                               |
+   | `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see (see Trust). Never passes `BROWSERBOX_*`.                              |
+   | `BROWSERBOX_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                       |
 
    A box can also take remote nodes: set `BROWSERBOX_ENROLLMENT_SECRETS` on it and point the nodes at it. A node that cannot join says why in its log (an unreachable address, a wrong secret, an invalid id or slot count, a duplicate id) and keeps trying.
 
@@ -170,7 +171,7 @@ What the box does enforce, tested against real Chromium (`test/scope.browser.tes
 
 - **Slots cannot reach each other.** Each slot is its own BrowserContext behind a virtual DevTools endpoint ([`src/node/scope.mjs`](src/node/scope.mjs)) that cannot see or reach another slot's pages, targets, contexts or sessions, including by guessing ids.
 - **A client is held to the web.** It cannot point a page at `file:`, `chrome:`, `devtools:`, `view-source:` or `about:` pages other than blank (only `http(s)`, `data:` and `blob:`), cannot have the browser read a file path into a page (`DOM.setFileInputFiles`, dragging files in), and cannot choose where a download goes (downloads are denied from the start).
-- **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's.
+- **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's: `PATH`, `HOME`, the locale (`LANG`, `LC_*`), `TZ`, the display (`DISPLAY`, `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_*`), library and font paths, and proxy and CA settings (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_*`). A headful node that needs more (`LIBGL_*`, `MESA_*`, `GTK_*`, `DBUS_SESSION_BUS_ADDRESS`) names it in `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH`; the box's own `BROWSERBOX_*` settings can never be passed.
 
 What it does **not** do: it limits what a client can _ask_ of the machine, it does not make a client harmless.
 

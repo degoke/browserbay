@@ -204,10 +204,15 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
      * The relay is giving up on this slot, but a node that did not answer in time (or lost its connection mid-create)
      * may have made the context anyway, and will report it on its next heartbeat. Remember the id as not ours, so that
      * report is not adopted as a slot nobody holds the token for, and tell the node to close what it made.
+     *
+     * A node that reconnected meanwhile may already have had the context adopted from its new hello (registerNode runs
+     * before this create is seen to fail), so end it if it is there, and tell the node's CURRENT connection: the one
+     * this create was sent on is closed.
      */
-    const abandon = (holder: NodeState | undefined) => {
+    const abandon = () => {
       tombstones.set(slotId, now() + tombstoneMs)
-      holder?.link?.send({ t: 'context.release', slotId })
+      if (!dropSlot(slotId, 'the create was abandoned', true))
+        nodes.get(node.id)?.link?.send({ t: 'context.release', slotId })
     }
     node.reserved++
     try {
@@ -227,14 +232,14 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
         })
       })
     } catch (error) {
-      abandon(node)
+      abandon()
       throw error
     } finally {
       node.reserved--
     }
     // The node may have been dropped while we waited; its slots were cleared with it.
     if (nodes.get(node.id) !== node) {
-      abandon(nodes.get(node.id))
+      abandon()
       throw new Error('The node went away')
     }
     slots.set(slotId, { slotId, runId: input.runId, nodeId: node.id, tokenHash, createdAt: now(), confirmedAt: now() })

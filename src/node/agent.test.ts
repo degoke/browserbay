@@ -455,10 +455,10 @@ test('agent: says why the relay will not have it, instead of retrying in silence
     relay.controls[refused++]!.close(code, reason)
   }
   try {
-    // The relay uses one code for a wrong secret and for an invalid hello; the reason tells them apart.
+    // A wrong secret and an invalid hello have their own close codes, whatever reason text comes with them.
     await refuse(4401, 'Unauthorized')
     await until(() => heard(/enrollment secret/), 'the enrollment secret to be blamed')
-    await refuse(4401, 'Invalid hello')
+    await refuse(4400, '')
     await until(() => heard(/id or slot count is not valid/), 'the invalid hello to be named')
     assert.deepEqual(warnings.find((entry) => /not valid/.test(entry.message))?.fields, {
       nodeId: 'n1',
@@ -503,6 +503,77 @@ test('agent: a relay it cannot reach is reported with the address and the error,
     assert.equal(agent.isConnected(), false)
   } finally {
     await agent.close()
+  }
+})
+
+test('agent: an error from one connection attempt is not blamed for a later attempt that had none', async () => {
+  const { scope } = await startBrowser()
+  let attempts = 0
+  /** Attempt 1 fails with an error event then closes; attempt 2 closes (1006) with no error event at all. */
+  class ScriptedSocket {
+    readyState = 0
+    private listeners: Record<string, Array<(event: unknown) => void>> = {}
+    constructor(readonly url: string) {
+      const attempt = ++attempts
+      setTimeout(() => {
+        if (attempt === 1) this.emit('error', { message: 'ECONNREFUSED' })
+        this.readyState = 3
+        this.emit('close', { code: 1006, reason: '' })
+      }, 1)
+    }
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      ;(this.listeners[type] ??= []).push(listener)
+    }
+    private emit(type: string, event: unknown) {
+      for (const listener of this.listeners[type] ?? []) listener(event)
+    }
+    send() {}
+    close() {}
+  }
+  const warnings: Array<{ message: string; fields?: Record<string, any> }> = []
+  const agent = startAgent({
+    relayUrl: 'http://127.0.0.1:1',
+    enrollmentSecret: SECRET,
+    nodeId: 'n1',
+    scope,
+    reconnectMinMs: 5,
+    reconnectMaxMs: 10,
+    WebSocketImpl: ScriptedSocket as unknown as typeof globalThis.WebSocket,
+    logger: { warn: (message: string, fields?: Record<string, any>) => warnings.push({ message, fields }) }
+  })
+  try {
+    await until(() => warnings.length >= 2, 'two reports')
+    assert.equal(warnings[0]!.fields?.error, 'ECONNREFUSED')
+    assert.equal(warnings[1]!.fields?.error, undefined, 'the second attempt reported no error, so none is shown')
+  } finally {
+    await agent.close()
+  }
+})
+
+test('agent: whenConnected ends when the agent is closed, instead of waiting out its timeout', async () => {
+  const relay = await startFakeRelay()
+  const { scope } = await startBrowser()
+  const agent = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n1', scope })
+  try {
+    await until(() => relay.of('hello').length === 1, 'the hello')
+    const waiting = agent.whenConnected(30_000)
+    const started = Date.now()
+    await agent.close()
+    await assert.rejects(waiting, /closed/)
+    assert.ok(Date.now() - started < 2000, 'it did not wait for its 30 s timeout')
+
+    // And once the relay answers, it resolves from the welcome itself.
+    const again = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n2', scope })
+    try {
+      const connected = again.whenConnected(10_000)
+      await until(() => relay.of('hello').length >= 2, 'the second hello')
+      relay.send({ t: 'welcome', heartbeatMs: 1000, version: 1 })
+      await connected
+    } finally {
+      await again.close()
+    }
+  } finally {
+    await relay.close()
   }
 })
 

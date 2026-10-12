@@ -592,8 +592,20 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
+  /** Keys whose context is still being made: reserved at once, so two creates for one key cannot both pass the check. */
+  const creating = new Set()
+
   async function createRun(runKey) {
-    if (runs.has(runKey)) throw new Error('This slot already has a browser context')
+    if (runs.has(runKey) || creating.has(runKey)) throw new Error('This slot already has a browser context')
+    creating.add(runKey)
+    try {
+      return await makeRun(runKey)
+    } finally {
+      creating.delete(runKey)
+    }
+  }
+
+  async function makeRun(runKey) {
     // disposeOnDetach:false, so a client disconnecting (a service handing the browser to a person) leaves the context alone.
     const { browserContextId } = await request('Target.createBrowserContext', { disposeOnDetach: false })
     // Files would land on this machine, outside any run's control. Denied from the start, not only if a client asks.

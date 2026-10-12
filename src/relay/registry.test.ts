@@ -153,6 +153,31 @@ test('a create lost to a dropped connection is not adopted when the node comes b
   assert.ok(second.sent.some((message) => message.t === 'context.release' && message.slotId === created.slotId))
 })
 
+test('a create lost to a node that RECONNECTS while it was pending is not left adopted from the new hello', async () => {
+  const registry = createNodeRegistry({ createTimeoutMs: 5000 })
+  const first = fakeLink(registry, 'n1', 'silent')
+  registry.registerNode({ id: 'n1', maxContexts: 2, link: first.link, contexts: [] })
+  const allocation = registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 0 })
+  await wait(10)
+  const created = first.sent.find((message) => message.t === 'context.create')
+  assert.ok(created && created.t === 'context.create')
+
+  // The node made the context, the confirmation was lost, and it came back on a new connection (the old one not yet
+  // seen to close) whose hello lists the context. registerNode adopts it before the pending create is rejected.
+  const second = fakeLink(registry, 'n1')
+  registry.registerNode({ id: 'n1', maxContexts: 2, link: second.link, contexts: [report(created.slotId, 'unheld')] })
+  await assert.rejects(allocation, NoCapacityError)
+
+  assert.deepEqual(registry.listSlots(), [], 'the slot adopted from the hello is ended: nobody holds its token')
+  assert.equal(registry.listNodes()[0]!.contexts, 0)
+  assert.ok(
+    second.sent.some((message) => message.t === 'context.release' && message.slotId === created.slotId),
+    'and the NEW connection, not the dead one, is told to close it'
+  )
+  registry.heartbeat('n1', second.link, { draining: false, contexts: [report(created.slotId, 'unheld')] })
+  assert.deepEqual(registry.listSlots(), [], 'a later heartbeat does not bring it back')
+})
+
 test('a restarted relay adopts what a node reports, and the run token still opens it', () => {
   const registry = createNodeRegistry()
   const node = fakeLink(registry, 'n1')

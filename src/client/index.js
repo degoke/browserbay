@@ -9,7 +9,7 @@
  *
  * Plain JavaScript with no dependencies, so it can be installed straight from git and used from any Node project.
  */
-import { RELAY_PATHS, SLOT_LIMITS, TOKEN_HEADER } from '../protocol.js'
+import { NAME_PATTERN, RELAY_PATHS, SLOT_LIMITS, TOKEN_HEADER } from '../protocol.js'
 
 /** Longer than the relay's own wait, so a full box is answered with 503 and not cut off by this side's timer. */
 const ACQUIRE_TIMEOUT_MARGIN_MS = 20_000
@@ -18,7 +18,6 @@ const RELEASE_TIMEOUT_MS = 10_000
 const REQUEST_TIMEOUT_MS = 15_000
 /** Between the two asks of `isAlive`: long enough for a blip to pass, short enough not to be felt. */
 const RETRY_DELAY_MS = 300
-const NAMESPACE = /^[\w.-]+$/
 
 export class BrowserBoxError extends Error {
   /** @param {string} message @param {number} [status] the HTTP status the box answered with, when it answered */
@@ -75,7 +74,7 @@ export function createBrowserBox(options) {
   const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS
   const logger = options.logger ?? {}
   // A ':' would let namespace `app` see and reap the slots of `app:staging`, which is the one thing a namespace is for.
-  if (options.namespace !== undefined && !NAMESPACE.test(options.namespace)) {
+  if (options.namespace && !NAME_PATTERN.test(options.namespace)) {
     throw new TypeError('A namespace may only contain letters, digits, "_", "." and "-"')
   }
   const namespacePrefix = options.namespace ? `${options.namespace}:` : undefined
@@ -191,6 +190,9 @@ export function createBrowserBox(options) {
         throw new TypeError(
           `maxLifetimeSeconds must be a whole number from ${SLOT_LIMITS.minLifetimeSeconds} to ${SLOT_LIMITS.maxLifetimeSeconds}`
         )
+      }
+      if (!Number.isInteger(waitMs) || waitMs < 0) {
+        throw new TypeError('waitMs must be a whole number of milliseconds, 0 or more')
       }
       const body = {
         runId: fullRunId,

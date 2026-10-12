@@ -11,6 +11,8 @@
  *   BROWSERBOX_HEADLESS                      'false' for a headful browser (needs a display)
  *   BROWSERBOX_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory)
  *   BROWSERBOX_CHROMIUM_EXECUTABLE           a Chromium other than the one in the image
+ *   BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH      comma-separated names of environment variables the browser should also see
+ *                                            (it gets only an allowlist otherwise; never BROWSERBOX_* ones)
  *
  * The process leaves when Chromium does, so give it a restart policy of "always".
  */
@@ -34,8 +36,10 @@ export function parseNodeSettings(env = process.env) {
   if (!NODE_LIMITS.nodeIdPattern.test(nodeId)) {
     throw new Error('BROWSERBOX_NODE_ID may only contain letters, digits, "_", "." and "-" (up to 100 characters).')
   }
-  const drainSeconds = Number(env.BROWSERBOX_DRAIN_SECONDS ?? 120)
-  if (env.BROWSERBOX_DRAIN_SECONDS === '' || !Number.isFinite(drainSeconds) || drainSeconds < 0) {
+  // Empty or blank means "not set", as it does for the other settings (platforms and Compose pass empty variables).
+  const drainText = (env.BROWSERBOX_DRAIN_SECONDS ?? '').trim()
+  const drainSeconds = drainText === '' ? 120 : Number(drainText)
+  if (!Number.isFinite(drainSeconds) || drainSeconds < 0) {
     throw new Error('BROWSERBOX_DRAIN_SECONDS must be a number of seconds, 0 or more.')
   }
   return {

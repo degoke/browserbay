@@ -21,12 +21,27 @@ export const TOKEN_HEADER = 'x-browserbox-token'
 /** Bumped when the node <-> relay messages change incompatibly. The relay refuses a node that speaks another one. */
 export const NODE_PROTOCOL_VERSION = 1
 
-/** What the relay accepts in a node's hello. A node that exceeds them is refused (close code 4401, reason "Invalid hello"). */
+/**
+ * The one rule for a name (a node's, a namespace's, an enrollment secret's): letters, digits, `_`, `.` and `-`. Kept
+ * here so the relay, the node, the client and the CLI cannot drift apart on it.
+ */
+const NAME_CHARS = '[\\w.-]'
+export const NAME_PATTERN = new RegExp(`^${NAME_CHARS}+$`)
+
+/** What the relay accepts in a node's hello. A node that exceeds them is refused (close code 4400). */
 export const NODE_LIMITS = {
   /** The most slots one node may offer. */
   maxContexts: 100,
-  /** A node's name: letters, digits, `_`, `.` and `-`. Unique per node: a second one with the same name replaces the first. */
-  nodeIdPattern: /^[\w.-]{1,100}$/
+  /** A node's name, up to 100 characters. Unique per node: a second one with the same name replaces the first. */
+  nodeIdPattern: new RegExp(`^${NAME_CHARS}{1,100}$`)
+}
+
+/**
+ * A setting the operator has to fix. The CLI exits with status 2 for it. Defined once, here, and recognised by `name`
+ * (not `instanceof`) because the compiled relay carries its own copy of this file in dist/.
+ */
+export class ConfigError extends Error {
+  name = 'ConfigError'
 }
 
 /** What the relay accepts when a slot is requested (400 `invalid_request` otherwise). */
@@ -49,6 +64,8 @@ export const RELAY_PATHS = {
 
 /** Close codes the relay and nodes use (4000-4999 are application codes; the WHATWG WebSocket a node uses cannot send others). */
 export const CLOSE = {
+  /** An authenticated node whose hello the relay will not accept: an id or a slot count outside NODE_LIMITS. */
+  invalidHello: 4400,
   unauthorized: 4401,
   unsupportedVersion: 4426,
   helloTimeout: 4408,

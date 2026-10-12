@@ -31,7 +31,7 @@ export interface AcquireOptions {
   runId: string
   /** The browser's node closes it after this long, whether or not anyone is still connected. 60 to 86400. */
   maxLifetimeSeconds: number
-  /** How long to wait for a free slot before giving up with a `NoCapacityError`. The box caps it at its own maximum. Default 30000. */
+  /** How long to wait for a free slot before giving up with a `NoCapacityError`, in whole milliseconds (0 means do not wait). The box caps it at its own maximum. Default 30000. */
   waitMs?: number
 }
 

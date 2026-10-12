@@ -157,6 +157,10 @@ test('client: refuses a namespace that could be mistaken for another, a bad run 
     assert.throws(() => createBrowserBox({ url: BOX, apiKey: API_KEY, namespace }), /namespace/, namespace)
   }
   for (const namespace of ['production', 'eu-west_1.app']) createBrowserBox({ url: BOX, apiKey: API_KEY, namespace })
+  // An empty namespace is no namespace (as `namespace: process.env.NS ?? ''` would mean), not an error.
+  const unnamespaced = fakeBox()
+  await client(unnamespaced.impl, { namespace: '' }).acquire(acquireOptions('plain'))
+  assert.equal(unnamespaced.calls[0]!.body!.runId, 'plain', 'no prefix')
 
   const box = fakeBox()
   const service = client(box.impl, { namespace: 'production' })
@@ -170,7 +174,15 @@ test('client: refuses a namespace that could be mistaken for another, a bad run 
       String(maxLifetimeSeconds)
     )
   }
+  for (const waitMs of [2.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '5' as unknown as number]) {
+    await assert.rejects(
+      () => service.acquire({ runId: 'ok', maxLifetimeSeconds: 600, waitMs }),
+      /waitMs must be a whole number of milliseconds/,
+      String(waitMs)
+    )
+  }
   assert.equal(box.calls.length, 0, 'nothing was asked of the box to find that out')
+  await service.acquire({ runId: 'ok', maxLifetimeSeconds: 600, waitMs: 0 })
   await service.acquire({ runId: 'x'.repeat(200 - 'production:'.length), maxLifetimeSeconds: 60 })
   await service.acquire({ runId: 'ok', maxLifetimeSeconds: 86_400 })
 })

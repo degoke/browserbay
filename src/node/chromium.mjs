@@ -79,6 +79,19 @@ const CHROMIUM_ENV = new Set([
   'ALL_PROXY'
 ])
 
+/**
+ * `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH` is how an operator adds to that (a headful node under Xvfb or on a GL host may
+ * need LIBGL_*, MESA_*, GTK_*, DBUS_SESSION_BUS_ADDRESS or a custom CA variable): comma-separated variable names. It
+ * can never pass the box's own settings, whatever it lists.
+ */
 export function chromiumEnv(env = process.env) {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => CHROMIUM_ENV.has(name) || name.startsWith('LC_')))
+  const extra = new Set(
+    (env.BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH ?? '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith('BROWSERBOX_'))
+  )
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => CHROMIUM_ENV.has(name) || extra.has(name) || name.startsWith('LC_'))
+  )
 }

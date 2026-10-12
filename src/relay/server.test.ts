@@ -228,7 +228,7 @@ test('a node must authenticate in its first frame', async () => {
     assert.equal(await new Promise((resolve) => notHello.once('close', resolve)), CLOSE.unauthorized)
 
     const badId = await connectNode(wsBase, { nodeId: 'has spaces/and slashes' })
-    assert.equal(await badId.closed, CLOSE.unauthorized)
+    assert.equal(await badId.closed, CLOSE.invalidHello, 'an id the relay will not accept is not blamed on the secret')
     assert.equal(relay.registry.listNodes().length, 0)
 
     const good = await connectNode(wsBase)

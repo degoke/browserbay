@@ -1,10 +1,6 @@
 import { z } from 'zod'
+import { ConfigError, NAME_PATTERN } from '../protocol.js'
 import type { EnrollmentSecret } from './server.js'
-
-/** A setting the operator has to fix. The CLI exits with status 2 for it, as it does for a node's. */
-export class ConfigError extends Error {
-  override name = 'ConfigError'
-}
 
 /**
  * `name:sha256hex` pairs, comma-separated: one per node (or group of nodes) allowed to join. Generate an entry with
@@ -21,7 +17,7 @@ export function parseEnrollmentSecrets(value: string, { allowEmpty = false } = {
       const separator = part.lastIndexOf(':')
       const id = part.slice(0, separator).trim()
       const sha256 = part.slice(separator + 1).trim()
-      if (separator < 1 || !/^[\w.-]+$/.test(id) || !/^[0-9a-f]{64}$/i.test(sha256)) {
+      if (separator < 1 || !NAME_PATTERN.test(id) || !/^[0-9a-f]{64}$/i.test(sha256)) {
         throw new ConfigError('BROWSERBOX_ENROLLMENT_SECRETS must be comma-separated name:sha256hex pairs')
       }
       return { id, sha256: sha256.toLowerCase() }

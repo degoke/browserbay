@@ -295,7 +295,7 @@ export function createRelayServer(options: RelayOptions) {
           Number.isInteger(message.maxContexts) &&
           message.maxContexts >= 1 &&
           message.maxContexts <= NODE_LIMITS.maxContexts
-        if (!validHello) return void ws.close(CLOSE.unauthorized, 'Invalid hello')
+        if (!validHello) return void ws.close(CLOSE.invalidHello, 'Invalid hello')
         // A node and relay that disagree on the frames cannot work together; say so rather than fail obscurely later.
         if (message.version !== NODE_PROTOCOL_VERSION) {
           logger.warn?.('A node speaks a different protocol version', {
