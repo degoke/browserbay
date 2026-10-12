@@ -525,3 +525,24 @@ test('client: a failed listing stops the reaper, and a release that fails is not
   assert.ok(logged.includes('stuck'), 'the slot id says which browser')
   assert.ok(!logged.includes(API_KEY) && !logged.includes('token-of-'), 'no secret is logged')
 })
+
+test('client: a slot can be released by its id alone, at the box named, and failures carry their status', async () => {
+  const box = fakeBox()
+  box.seed('orphan', 'run-a', 30)
+  await client(box.impl).release('orphan')
+  assert.deepEqual(box.deleted(), ['orphan'])
+  assert.equal(box.calls[0]!.url.href, `${BOX}/v1/slots/orphan`)
+  assert.equal(box.calls[0]!.headers.Authorization, `Bearer ${API_KEY}`)
+
+  const elsewhere = fakeBox()
+  await client(elsewhere.impl).release('x', { url: 'https://other.example.com/' })
+  assert.equal(elsewhere.calls[0]!.url.href, 'https://other.example.com/v1/slots/x')
+
+  await client(fakeBox({ deleteStatus: () => 404 }).impl).release('already-gone')
+  await assert.rejects(
+    () => client(fakeBox({ deleteStatus: () => 500 }).impl).release('stuck'),
+    (error: unknown) => error instanceof BrowserBoxError && error.status === 500
+  )
+  await assert.rejects(() => client(box.impl).release(''), /needs a slotId/)
+  await assert.rejects(() => client(box.impl).release('x', { url: 'ftp://nope' }), /http\(s\)/)
+})

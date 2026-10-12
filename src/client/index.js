@@ -180,6 +180,11 @@ export function createBrowserBox(options) {
       return makeSlot({ url: stored.url ?? boxUrl, slotId: stored.slotId, token: stored.token, nodeId: stored.nodeId })
     },
 
+    async release(slotId, { url } = {}) {
+      if (typeof slotId !== 'string' || !slotId) throw new TypeError('release needs a slotId')
+      await deleteSlot(url ? assertBoxUrl(url) : boxUrl, slotId)
+    },
+
     list,
 
     async nodes() {

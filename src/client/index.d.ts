@@ -68,6 +68,8 @@ export interface BrowserBox {
   acquire(options: AcquireOptions): Promise<Slot>
   /** A slot you stored earlier. Makes no request; use `isAlive()` to find out whether it still exists. */
   slot(stored: StoredSlot): Slot
+  /** Releases a slot by its id, for when you no longer hold its token (a stored handle you cannot decrypt, an orphan found by `list`). Idempotent. */
+  release(slotId: string, options?: { url?: string }): Promise<void>
   /** This service's slots (all of them, or only those in the namespace, with the namespace removed from their run ids). */
   list(): Promise<SlotSummary[]>
   nodes(): Promise<NodeSummary[]>

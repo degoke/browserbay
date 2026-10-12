@@ -74,6 +74,7 @@ const box = createBrowserBox({ url, apiKey, namespace?, logger?, fetch?, now? })
 
 box.acquire({ runId, maxLifetimeSeconds, waitMs? })  // → Slot
 box.slot(stored)                                      // a Slot from what you saved earlier; makes no request
+box.release(slotId, { url? })                         // releases a slot you only know the id of
 box.list()                                            // slots (this namespace's, if you set one)
 box.nodes()                                           // nodes and their load
 box.reap({ isLive, graceMs?, skip? })                 // releases slots whose owner `isLive` says is gone
