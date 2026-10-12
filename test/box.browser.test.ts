@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createServer as createNetServer, type AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -17,7 +17,7 @@ import { chromium } from 'playwright'
 import { createBrowserBox, NoCapacityError, type Slot } from '../src/client/index.js'
 import { hashToken } from '../src/relay/registry.js'
 import { createRelayServer } from '../src/relay/server.js'
-import { connect, enabled, serve, until, watch, watchDriveReattach } from './support.js'
+import { connect, enabled, removeProfile, serve, until, watch, watchDriveReattach } from './support.js'
 
 const API_KEY = 'box-test-api-key-0123456789'
 const SECRET = 'box-test-enrollment-secret'
@@ -69,7 +69,7 @@ async function startNode(relayUrl: string, executable: string, nodeId = 'node-1'
     crashBrowser: () => execFileSync('pkill', ['-9', '-f', '--', `user-data-dir=${profileDir}`]),
     async stop() {
       await node.stop()
-      await rm(profileDir, { recursive: true, force: true })
+      await removeProfile(profileDir)
     }
   }
 }
@@ -291,7 +291,7 @@ test(
       server.close()
       await remote?.stop()
       await box.stop()
-      await rm(profileDir, { recursive: true, force: true })
+      await removeProfile(profileDir)
     }
   }
 )

@@ -14,6 +14,13 @@ import { WebSocket } from 'ws'
 
 export const enabled = process.env.PLAYWRIGHT_BROWSER_TESTS === '1'
 
+/**
+ * Removes a Chromium profile. A killed Chromium's helper processes (GPU, renderers) can still be writing into it for a
+ * moment, so a plain recursive remove can fail with ENOTEMPTY: try again until they are gone.
+ */
+export const removeProfile = (path: string) =>
+  rm(path, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+
 export const PAGE = `<!doctype html><html><body style="margin:0">
 <button id="b" style="position:absolute;left:100px;top:100px;width:200px;height:60px"
   onclick="document.getElementById('out').textContent = 'clicked'">Click me</button>
@@ -122,8 +129,10 @@ export async function launchChromium() {
   return {
     webSocketDebuggerUrl,
     async stop() {
+      const exited = new Promise((resolve) => child.once('exit', resolve))
       child.kill('SIGKILL')
-      await rm(profile, { recursive: true, force: true })
+      await exited
+      await removeProfile(profile)
     }
   }
 }
