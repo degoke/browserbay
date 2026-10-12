@@ -577,6 +577,32 @@ test('agent: whenConnected ends when the agent is closed, instead of waiting out
   }
 })
 
+test('agent: closing an agent that keeps reconnecting leaves no connection behind, so the relay can shut down', async () => {
+  const { scope } = await startBrowser()
+  for (let i = 0; i < 10; i++) {
+    const relay = await startFakeRelay()
+    const agent = startAgent({
+      relayUrl: relay.url,
+      enrollmentSecret: SECRET,
+      nodeId: 'n1',
+      scope,
+      reconnectMinMs: 5,
+      reconnectMaxMs: 10
+    })
+    // Refuse every connection straight away, so the agent is always somewhere between "connecting" and "reconnecting".
+    const refuser = setInterval(() => {
+      for (const control of relay.controls) if (control.readyState === 1) control.close(4401, 'Unauthorized')
+    }, 2)
+    await wait(60)
+    clearInterval(refuser)
+    await agent.close()
+    // A connection that was still being made when the agent closed used to complete afterwards and stay open for ever:
+    // the relay's server.close() then never finished, and neither did the process.
+    const result = await Promise.race([relay.close().then(() => 'closed'), wait(3000).then(() => 'HUNG')])
+    assert.equal(result, 'closed', `round ${i}: the relay could not close because a connection was left behind`)
+  }
+})
+
 test('agent: a relay that sends things that are not messages does not take the node down', async () => {
   const relay = await startFakeRelay()
   const { scope } = await startBrowser()

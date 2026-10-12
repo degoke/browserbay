@@ -336,9 +336,11 @@ export function startAgent({
       closing = true
       clearTimeout(reconnectTimer)
       clearInterval(heartbeatTimer)
-      for (const socket of [...streams]) if (socket.readyState === OPEN) socket.close(1000, 'The node is stopping')
+      // CONNECTING (0) as well as OPEN (1): a connection still being made has to be abandoned too, or it completes after
+      // this and is never closed by anyone, which keeps the process (and the relay's own shutdown) waiting for it.
+      for (const socket of [...streams]) if (socket.readyState <= OPEN) socket.close(1000, 'The node is stopping')
       for (const { timer } of contexts.values()) clearTimeout(timer)
-      if (control?.readyState === OPEN) control.close(1000, 'The node is stopping')
+      if (control && control.readyState <= OPEN) control.close(1000, 'The node is stopping')
       control = null
       for (const resolve of [...waiters]) resolve()
       for (const waiter of [...connectWaiters]) waiter.reject(new Error('The agent was closed'))
