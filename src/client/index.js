@@ -9,13 +9,16 @@
  *
  * Plain JavaScript with no dependencies, so it can be installed straight from git and used from any Node project.
  */
-import { RELAY_PATHS, TOKEN_HEADER } from '../protocol.js'
+import { RELAY_PATHS, SLOT_LIMITS, TOKEN_HEADER } from '../protocol.js'
 
 /** Longer than the relay's own wait, so a full box is answered with 503 and not cut off by this side's timer. */
 const ACQUIRE_TIMEOUT_MARGIN_MS = 20_000
 const LOOKUP_TIMEOUT_MS = 3000
 const RELEASE_TIMEOUT_MS = 10_000
 const REQUEST_TIMEOUT_MS = 15_000
+/** Between the two asks of `isAlive`: long enough for a blip to pass, short enough not to be felt. */
+const RETRY_DELAY_MS = 300
+const NAMESPACE = /^[\w.-]+$/
 
 export class BrowserBoxError extends Error {
   /** @param {string} message @param {number} [status] the HTTP status the box answered with, when it answered */
@@ -69,8 +72,30 @@ export function createBrowserBox(options) {
   if (!options.apiKey) throw new TypeError('createBrowserBox needs an apiKey')
   const doFetch = options.fetch ?? fetch
   const now = options.now ?? Date.now
+  const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS
   const logger = options.logger ?? {}
+  // A ':' would let namespace `app` see and reap the slots of `app:staging`, which is the one thing a namespace is for.
+  if (options.namespace !== undefined && !NAMESPACE.test(options.namespace)) {
+    throw new TypeError('A namespace may only contain letters, digits, "_", "." and "-"')
+  }
   const namespacePrefix = options.namespace ? `${options.namespace}:` : undefined
+
+  /**
+   * The box a slot lives on. The API key (to release) and the slot token (to look it up) are sent there, so an address
+   * read back from storage is only used when it is this client's own box, unless `allowOtherBoxes` says a stored slot
+   * may name its own (a service whose box moved while slots were live, and whose storage it trusts).
+   */
+  function boxOf(url) {
+    if (url === undefined) return boxUrl
+    const base = assertBoxUrl(url)
+    if (base !== boxUrl && !options.allowOtherBoxes) {
+      throw new TypeError(
+        `This slot is on ${new URL(base).origin}, not on this client's box (${new URL(boxUrl).origin}). ` +
+          'Its credentials are only sent to the box this client was made for; set allowOtherBoxes to use it anyway.'
+      )
+    }
+    return base
+  }
 
   /** A call to the box as its owner (create, list, release). The address is a parameter: a stored slot names its own. */
   function api(base, path, init = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -111,12 +136,13 @@ export function createBrowserBox(options) {
       } catch {
         // A restart of the box or a dropped request is not proof the slot is gone, so try once more.
       }
+      if (attempt === 0 && retryDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
     }
     return false
   }
 
   function makeSlot({ url, slotId, token, nodeId }) {
-    const base = assertBoxUrl(url)
+    const base = boxOf(url)
     const cdpUrl = cdpUrlFor(base, slotId)
     return Object.freeze({
       url: base,
@@ -151,8 +177,23 @@ export function createBrowserBox(options) {
 
   return {
     async acquire({ runId, maxLifetimeSeconds, waitMs = 30_000 }) {
+      const fullRunId = namespacePrefix ? `${namespacePrefix}${runId}` : runId
+      if (typeof runId !== 'string' || !runId || fullRunId.length > SLOT_LIMITS.maxRunIdLength) {
+        throw new TypeError(
+          `runId must be a string of 1 to ${SLOT_LIMITS.maxRunIdLength} characters (the namespace counts)`
+        )
+      }
+      if (
+        !Number.isInteger(maxLifetimeSeconds) ||
+        maxLifetimeSeconds < SLOT_LIMITS.minLifetimeSeconds ||
+        maxLifetimeSeconds > SLOT_LIMITS.maxLifetimeSeconds
+      ) {
+        throw new TypeError(
+          `maxLifetimeSeconds must be a whole number from ${SLOT_LIMITS.minLifetimeSeconds} to ${SLOT_LIMITS.maxLifetimeSeconds}`
+        )
+      }
       const body = {
-        runId: namespacePrefix ? `${namespacePrefix}${runId}` : runId,
+        runId: fullRunId,
         maxLifetimeSeconds,
         waitMs
       }
@@ -182,7 +223,7 @@ export function createBrowserBox(options) {
 
     async release(slotId, { url } = {}) {
       if (typeof slotId !== 'string' || !slotId) throw new TypeError('release needs a slotId')
-      await deleteSlot(url ? assertBoxUrl(url) : boxUrl, slotId)
+      await deleteSlot(boxOf(url), slotId)
     },
 
     list,

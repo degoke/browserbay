@@ -39,6 +39,16 @@ test('cli: `secret` prints a pair the node and the relay both accept, and that m
   assert.equal(cli(['secret']).stdout.includes('=node:'), true, 'the entry is named `node` unless told otherwise')
 })
 
+test('cli: `secret` refuses a name the relay would refuse, so the printed entry is always usable', () => {
+  for (const name of ['my laptop', 'a:b', 'a,b', 'é']) {
+    const result = cli(['secret', name])
+    assert.equal(result.status, 2, name)
+    assert.equal(result.stdout, '', 'nothing printed that could be pasted')
+    assert.match(result.stderr, /may only contain letters/)
+  }
+  assert.equal(cli(['secret', 'eu-west_1.edge']).status, 0)
+})
+
 test('cli: help, and an unknown command is an error that shows the help', () => {
   const help = cli(['--help'])
   assert.equal(help.status, 0)
@@ -53,7 +63,7 @@ test('cli: help, and an unknown command is an error that shows the help', () => 
 
 test('cli: a bad setting is a sentence and a non-zero exit, never a stack trace', () => {
   const relay = cli(['relay'])
-  assert.equal(relay.status, 1)
+  assert.equal(relay.status, 2)
   assert.match(relay.stderr, /Invalid relay configuration: BROWSERBOX_API_KEY/)
   assert.doesNotMatch(relay.stderr, /\n\s+at /, 'no stack')
 

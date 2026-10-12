@@ -25,8 +25,10 @@ export async function runBox(env = process.env) {
     relayModule = await import('../../dist/relay/server.js')
     configModule = await import('../../dist/relay/config.js')
   } catch (error) {
-    if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error
-    console.error('The relay is not built. Run `pnpm build` first (the Docker image does this for you).')
+    if (error?.code !== 'ERR_MODULE_NOT_FOUND' || !/dist[\\/]relay/.test(String(error.message))) throw error
+    console.error(
+      'The relay is not built (dist/ is missing). In a checkout, run `pnpm build`; the Docker image has it built.'
+    )
     process.exit(2)
   }
 

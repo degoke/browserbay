@@ -434,6 +434,99 @@ test('end to end: a relay that restarts finds its runs again, and the run tokens
   }
 })
 
+test('agent: says why the relay will not have it, instead of retrying in silence', async () => {
+  const relay = await startFakeRelay()
+  const { scope } = await startBrowser()
+  const warnings: Array<{ message: string; fields?: Record<string, unknown> }> = []
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'n1',
+    scope,
+    reconnectMinMs: 5,
+    reconnectMaxMs: 10,
+    logger: { warn: (message: string, fields?: Record<string, unknown>) => warnings.push({ message, fields }) }
+  })
+  const heard = (pattern: RegExp) => warnings.some((entry) => pattern.test(entry.message))
+  // Refuses the node's connections in the order they arrive, one close per attempt.
+  let refused = 0
+  const refuse = async (code: number, reason: string) => {
+    await until(() => relay.controls.length > refused, 'the node to connect')
+    relay.controls[refused++]!.close(code, reason)
+  }
+  try {
+    // The relay uses one code for a wrong secret and for an invalid hello; the reason tells them apart.
+    await refuse(4401, 'Unauthorized')
+    await until(() => heard(/enrollment secret/), 'the enrollment secret to be blamed')
+    await refuse(4401, 'Invalid hello')
+    await until(() => heard(/id or slot count is not valid/), 'the invalid hello to be named')
+    assert.deepEqual(warnings.find((entry) => /not valid/.test(entry.message))?.fields, {
+      nodeId: 'n1',
+      maxContexts: 5
+    })
+    await refuse(4409, 'This node connected again')
+    await until(() => heard(/Another node with this id/), 'the duplicate id to be named')
+    await refuse(4426, 'Unsupported protocol version')
+    await until(() => heard(/different protocol version/), 'the version mismatch to be named')
+    assert.ok(
+      !warnings.some((entry) => /Could not connect/.test(entry.message)),
+      'a relay that answers is not "unreachable"'
+    )
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('agent: a relay it cannot reach is reported with the address and the error, not retried in silence', async () => {
+  const { scope } = await startBrowser()
+  const warnings: Array<{ message: string; fields?: Record<string, any> }> = []
+  const agent = startAgent({
+    relayUrl: 'http://127.0.0.1:1',
+    enrollmentSecret: SECRET,
+    nodeId: 'n1',
+    scope,
+    reconnectMinMs: 5,
+    reconnectMaxMs: 10,
+    logger: { warn: (message: string, fields?: Record<string, any>) => warnings.push({ message, fields }) }
+  })
+  try {
+    await until(() => warnings.length >= 3, 'three reports')
+    assert.ok(warnings.every((entry) => /Could not connect to the relay/.test(entry.message)))
+    assert.equal(warnings[0]!.fields?.relay, 'http://127.0.0.1:1')
+    assert.deepEqual(
+      warnings.slice(0, 3).map((entry) => entry.fields?.attempt),
+      [1, 2, 3]
+    )
+    await wait(300)
+    assert.ok(warnings.length < 8, 'the next report waits: it is said at the start and now and then, not every try')
+    assert.equal(agent.isConnected(), false)
+  } finally {
+    await agent.close()
+  }
+})
+
+test('agent: a relay that sends things that are not messages does not take the node down', async () => {
+  const relay = await startFakeRelay()
+  const { scope } = await startBrowser()
+  const uncaught: unknown[] = []
+  const onUncaught = (error: unknown) => uncaught.push(error)
+  process.on('uncaughtException', onUncaught)
+  const agent = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n1', scope })
+  try {
+    await until(() => relay.of('hello').length === 1, 'the hello')
+    for (const frame of ['null', 'true', '7', '"text"', '[]', '[null]', 'not json']) relay.control().send(frame)
+    relay.send({ t: 'welcome', heartbeatMs: 30, version: 1 })
+    await until(() => relay.of('heartbeat').length >= 1, 'a heartbeat after the junk')
+    assert.deepEqual(uncaught, [], 'nothing was thrown')
+    assert.equal(agent.isConnected(), true)
+  } finally {
+    process.off('uncaughtException', onUncaught)
+    await agent.close()
+    await relay.close()
+  }
+})
+
 test('end to end: a full pool refuses another run without ever reaching the browser', async () => {
   const { fake, scope } = await startBrowser()
   const { relay, base } = await startPool()

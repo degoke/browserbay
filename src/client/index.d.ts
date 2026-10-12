@@ -9,18 +9,27 @@ export interface BrowserBoxOptions {
   apiKey: string
   /**
    * Marks this service's slots (as a prefix on their run ids) so `list` and `reap` leave another service's alone when
-   * several share a box. A naming convention, not an access control: anything holding the API key can still reach any slot.
+   * several share a box. Letters, digits, `_`, `.` and `-` only. A naming convention, not an access control: anything
+   * holding the API key can still reach any slot.
    */
   namespace?: string
+  /**
+   * Whether a stored slot (`box.slot(stored)`, `box.release(id, { url })`) may name a box other than this client's. Off by
+   * default: the API key and slot tokens are sent to the box a slot names, so an address read back from storage that
+   * someone else could have written would be somewhere to send them. Turn it on for storage you trust.
+   */
+  allowOtherBoxes?: boolean
   logger?: { warn?(message: string, fields?: Record<string, unknown>): void }
   fetch?: typeof fetch
   now?: () => number
+  /** The pause between `isAlive`'s two asks. Default 300; tests set 0. */
+  retryDelayMs?: number
 }
 
 export interface AcquireOptions {
-  /** Your own id for what the browser is for (a run, a task, a job). `list` and `reap` hand it back to you. */
+  /** Your own id for what the browser is for (a run, a task, a job), up to 200 characters with the namespace. `list` and `reap` hand it back to you. */
   runId: string
-  /** The browser's node closes it after this long, whether or not anyone is still connected. */
+  /** The browser's node closes it after this long, whether or not anyone is still connected. 60 to 86400. */
   maxLifetimeSeconds: number
   /** How long to wait for a free slot before giving up with a `NoCapacityError`. The box caps it at its own maximum. Default 30000. */
   waitMs?: number

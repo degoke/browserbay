@@ -175,6 +175,43 @@ test('the REST side needs the API key, and refuses what it cannot make sense of'
   }
 })
 
+test('an authenticated node that sends things that are not messages ends nothing but those messages', async () => {
+  const { relay, base, wsBase } = await startRelay()
+  const uncaught: unknown[] = []
+  const onUncaught = (error: unknown) => uncaught.push(error)
+  process.on('uncaughtException', onUncaught)
+  try {
+    const node = await connectNode(wsBase)
+    await node.welcomed()
+    // Valid JSON that is not an object used to throw inside the socket's listener, and take the whole relay with it.
+    for (const frame of [
+      'null',
+      'true',
+      '7',
+      '"text"',
+      '[]',
+      '[null]',
+      '{}',
+      '{"t":null}',
+      '{"t":"heartbeat","contexts":"nope"}',
+      'not json'
+    ]) {
+      node.control.send(frame)
+    }
+    node.control.send(Buffer.from([1, 2, 3]))
+    node.heartbeat()
+    await wait(100)
+
+    assert.deepEqual(uncaught, [], 'nothing was thrown')
+    assert.equal((await rest(base, RELAY_PATHS.nodes)).status, 200, 'the relay is still serving')
+    assert.equal(relay.registry.listNodes()[0]?.nodeId, 'n1', 'and the node is still a member')
+    assert.equal((await createSlot(base)).status, 201, 'and still takes slots')
+  } finally {
+    process.off('uncaughtException', onUncaught)
+    await relay.close()
+  }
+})
+
 test('a node must authenticate in its first frame', async () => {
   const { relay, wsBase } = await startRelay({ helloTimeoutMs: 150 })
   try {

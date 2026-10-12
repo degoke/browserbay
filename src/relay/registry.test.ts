@@ -117,6 +117,42 @@ test('a node that never confirms a create is given up on', async () => {
   assert.equal(registry.listNodes()[0]!.contexts, 0, 'the reservation was given back')
 })
 
+test('a create the relay gave up on is not adopted later, when the node turns out to have made it', async () => {
+  const registry = createNodeRegistry({ createTimeoutMs: 30 })
+  const node = fakeLink(registry, 'n1', 'silent')
+  registry.registerNode({ id: 'n1', maxContexts: 2, link: node.link, contexts: [] })
+  await assert.rejects(registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 0 }), NoCapacityError)
+  const created = node.sent.find((message) => message.t === 'context.create')
+  assert.ok(created && created.t === 'context.create')
+  const releases = () =>
+    node.sent.filter((message) => message.t === 'context.release' && message.slotId === created.slotId)
+  assert.equal(releases().length, 1, 'the node is told to drop it the moment the relay gives up')
+
+  // The node did create it, slowly: its next heartbeat reports a context nobody holds the token for.
+  registry.heartbeat('n1', node.link, { draining: false, contexts: [report(created.slotId, 'never-handed-out')] })
+  assert.deepEqual(registry.listSlots(), [], 'it is not adopted: it would fill a place until its lifetime ran out')
+  assert.equal(registry.listNodes()[0]!.contexts, 0)
+  assert.equal(releases().length, 2, 'and the node is told again')
+})
+
+test('a create lost to a dropped connection is not adopted when the node comes back holding it', async () => {
+  const registry = createNodeRegistry({ createTimeoutMs: 5000 })
+  const first = fakeLink(registry, 'n1', 'silent')
+  registry.registerNode({ id: 'n1', maxContexts: 2, link: first.link, contexts: [] })
+  const allocation = registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 0 })
+  await wait(10)
+  const created = first.sent.find((message) => message.t === 'context.create')
+  assert.ok(created && created.t === 'context.create')
+
+  registry.unregisterNode('n1', first.link)
+  await assert.rejects(allocation, NoCapacityError)
+
+  const second = fakeLink(registry, 'n1')
+  registry.registerNode({ id: 'n1', maxContexts: 2, link: second.link, contexts: [report(created.slotId, 'unheld')] })
+  assert.deepEqual(registry.listSlots(), [], 'what the node says it holds is not ours to adopt')
+  assert.ok(second.sent.some((message) => message.t === 'context.release' && message.slotId === created.slotId))
+})
+
 test('a restarted relay adopts what a node reports, and the run token still opens it', () => {
   const registry = createNodeRegistry()
   const node = fakeLink(registry, 'n1')

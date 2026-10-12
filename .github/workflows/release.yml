@@ -25,6 +25,8 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - name: The tag is the package version
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
       - run: pnpm exec playwright install --with-deps chromium
@@ -62,7 +64,8 @@ jobs:
             type=semver,pattern=v{{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
+            # a pre-release (v1.0.0-rc.1) must not become what `latest` pulls
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@v6
         with:
           context: .

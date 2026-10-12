@@ -4,6 +4,17 @@ export declare const TOKEN_HEADER: 'x-browserbox-token'
 
 export declare const NODE_PROTOCOL_VERSION: 1
 
+export declare const NODE_LIMITS: {
+  readonly maxContexts: 100
+  readonly nodeIdPattern: RegExp
+}
+
+export declare const SLOT_LIMITS: {
+  readonly minLifetimeSeconds: 60
+  readonly maxLifetimeSeconds: 86400
+  readonly maxRunIdLength: 200
+}
+
 export declare const RELAY_PATHS: {
   readonly health: '/health'
   readonly slots: '/v1/slots'

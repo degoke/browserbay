@@ -220,7 +220,11 @@ test(
       assert.equal(await slot.isAlive(), true, 'reachable before the crash')
 
       first.crashBrowser()
-      assert.notEqual(await first.exited, 0, 'the node leaves when its browser does, so the platform restarts it')
+      assert.equal(
+        await first.exited,
+        1,
+        'the node leaves when its browser does (status 1, not a clean stop), so the platform restarts it'
+      )
       await until(async () => !(await slot.isAlive()), 'the slot to be reported unreachable', 20_000)
 
       // With no node left there is nowhere to put a replacement: the caller is told so, not left hanging.

@@ -40,3 +40,45 @@ export function chromiumArgs({ profileDir, headless = true, sandbox = false }) {
     'about:blank'
   ]
 }
+
+/**
+ * What Chromium may see of its parent's environment. Not all of it: the parent's environment holds the box's own
+ * secrets (the API key, the enrollment secret) and, on a platform, usually unrelated ones (database URLs, cloud
+ * credentials), and pages the browser runs are not trusted with any of them. What is kept is what a browser needs to
+ * find its libraries, fonts, a display, its time zone and locale, and to reach the network through a proxy.
+ */
+const CHROMIUM_ENV = new Set([
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'LANG',
+  'LANGUAGE',
+  'TZ',
+  'TMPDIR',
+  'DISPLAY',
+  'XAUTHORITY',
+  'WAYLAND_DISPLAY',
+  'XDG_RUNTIME_DIR',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'LD_LIBRARY_PATH',
+  'FONTCONFIG_PATH',
+  'FONTCONFIG_FILE',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  '__CF_USER_TEXT_ENCODING',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'all_proxy',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'ALL_PROXY'
+])
+
+export function chromiumEnv(env = process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => CHROMIUM_ENV.has(name) || name.startsWith('LC_')))
+}

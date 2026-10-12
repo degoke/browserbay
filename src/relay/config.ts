@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import type { EnrollmentSecret } from './server.js'
 
+/** A setting the operator has to fix. The CLI exits with status 2 for it, as it does for a node's. */
+export class ConfigError extends Error {
+  override name = 'ConfigError'
+}
+
 /**
  * `name:sha256hex` pairs, comma-separated: one per node (or group of nodes) allowed to join. Generate an entry with
  * `browserbox secret` and give the node the secret and the relay the hash.
@@ -17,11 +22,12 @@ export function parseEnrollmentSecrets(value: string, { allowEmpty = false } = {
       const id = part.slice(0, separator).trim()
       const sha256 = part.slice(separator + 1).trim()
       if (separator < 1 || !/^[\w.-]+$/.test(id) || !/^[0-9a-f]{64}$/i.test(sha256)) {
-        throw new Error('BROWSERBOX_ENROLLMENT_SECRETS must be comma-separated name:sha256hex pairs')
+        throw new ConfigError('BROWSERBOX_ENROLLMENT_SECRETS must be comma-separated name:sha256hex pairs')
       }
       return { id, sha256: sha256.toLowerCase() }
     })
-  if (entries.length === 0 && !allowEmpty) throw new Error('BROWSERBOX_ENROLLMENT_SECRETS needs at least one entry')
+  if (entries.length === 0 && !allowEmpty)
+    throw new ConfigError('BROWSERBOX_ENROLLMENT_SECRETS needs at least one entry')
   return entries
 }
 
@@ -37,7 +43,7 @@ export function parseRelayConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = relayEnvSchema.safeParse(env)
   if (!parsed.success) {
     const problems = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')
-    throw new Error(`Invalid relay configuration: ${problems}`)
+    throw new ConfigError(`Invalid relay configuration: ${problems}`)
   }
   return {
     port: parsed.data.PORT,
@@ -57,7 +63,7 @@ export function parseBoxConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = boxEnvSchema.safeParse(env)
   if (!parsed.success) {
     const problems = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')
-    throw new Error(`Invalid configuration: ${problems}`)
+    throw new ConfigError(`Invalid configuration: ${problems}`)
   }
   return {
     port: parsed.data.PORT,

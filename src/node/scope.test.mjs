@@ -164,11 +164,126 @@ test('downloads are denied for the run’s context, and a client cannot choose w
     downloadPath: '/tmp/x',
     eventsEnabled: true
   })
-  assert.deepEqual(world.fake.commands('Browser.setDownloadBehavior')[0].params, {
-    behavior: 'deny',
-    eventsEnabled: false,
-    browserContextId: a.contextId
-  })
+  // The run's own context was already denied downloads when it was made; this is the client's call being rewritten.
+  const denied = { behavior: 'deny', eventsEnabled: false, browserContextId: a.contextId }
+  assert.deepEqual(
+    world.fake.commands('Browser.setDownloadBehavior').map((command) => command.params),
+    [denied, denied]
+  )
+})
+
+test('a run’s context is denied downloads from the start, without its client having to ask', async () => {
+  const { fake, scope } = await setup()
+  const { contextId } = await scope.createRun('a')
+  assert.deepEqual(
+    fake.commands('Browser.setDownloadBehavior').map((command) => command.params),
+    [{ behavior: 'deny', eventsEnabled: false, browserContextId: contextId }]
+  )
+})
+
+/** A run with a page of its own and a session on it, as a client that attached to the tab has. */
+async function pageSession(world, runKey) {
+  const run = await controller(world, runKey)
+  const targetId = world.fake.createTarget({ browserContextId: run.contextId, url: 'https://a/' })
+  await world.fake.flush()
+  const { sessionId } = (await run.client.call('Target.attachToTarget', { targetId, flatten: true })).result
+  return { ...run, sessionId, targetId }
+}
+
+test('a page can be pointed at the web, but not at the node: file:, chrome:, view-source: and friends are refused', async () => {
+  const world = await setup()
+  const a = await pageSession(world, 'a')
+
+  for (const url of [
+    'https://example.com/',
+    'http://example.com/path?q=1#x',
+    'about:blank',
+    'about:srcdoc',
+    'data:text/html,<p>hi</p>',
+    'blob:https://example.com/0f4e'
+  ]) {
+    const answer = await a.client.call('Page.navigate', { url }, a.sessionId)
+    assert.equal(answer.error, undefined, `${url} is allowed`)
+  }
+  assert.equal(world.fake.commands('Page.navigate').length, 6, 'and reached the browser')
+
+  for (const url of [
+    'file:///etc/passwd',
+    'FILE:///proc/1/environ',
+    'view-source:file:///etc/hosts',
+    'view-source:https://example.com/',
+    'chrome://inspect/#pages',
+    'chrome://version',
+    'devtools://devtools/bundled/inspector.html',
+    'about:version',
+    'javascript:alert(1)',
+    'ftp://example.com/',
+    'filesystem:https://example.com/temporary/x',
+    'not a url',
+    ''
+  ]) {
+    const answer = await a.client.call('Page.navigate', { url }, a.sessionId)
+    assert.equal(answer.error?.code, -32602, `${url || '(empty)'} is refused`)
+    assert.match(answer.error.message, /cannot be opened on a shared browser/)
+  }
+  assert.equal((await a.client.call('Page.navigate', {}, a.sessionId)).error?.code, -32602, 'a missing url is refused')
+  assert.equal(world.fake.commands('Page.navigate').length, 6, 'none of the refused ones reached the browser')
+  assert.ok(world.warnings.includes('A navigation to a refused URL was blocked'), 'and each is logged')
+})
+
+test('a new tab cannot be opened on a refused URL either, and the default tab is still fine', async () => {
+  const world = await setup()
+  const a = await controller(world, 'a')
+  await a.attach()
+
+  for (const url of ['file:///etc/passwd', 'chrome://inspect', 'view-source:file:///x', 'about:version']) {
+    const answer = await a.client.call('Target.createTarget', { url })
+    assert.equal(answer.error?.code, -32602, url)
+  }
+  assert.equal(world.fake.commands('Target.createTarget').length, 0, 'no tab was made')
+  assert.equal((await a.client.call('Target.createTarget', { url: 'about:blank' })).error, undefined)
+  assert.equal((await a.client.call('Target.createTarget', {})).error, undefined, 'no url at all is a blank tab')
+  assert.equal((await a.client.call('Target.createTarget', { url: 'https://example.com/' })).error, undefined)
+  assert.equal(world.fake.commands('Target.createTarget').length, 3)
+})
+
+test('a paused request can be rewritten to another web address, not to a file', async () => {
+  const world = await setup()
+  const a = await pageSession(world, 'a')
+  const pass = (params) => a.client.call('Fetch.continueRequest', { requestId: 'r', ...params }, a.sessionId)
+
+  assert.equal((await pass({})).error, undefined, 'continuing as it is')
+  assert.equal((await pass({ url: 'https://example.com/other' })).error, undefined)
+  assert.equal((await pass({ url: 'file:///etc/passwd' })).error?.code, -32602)
+  assert.equal((await pass({ url: 'chrome://version' })).error?.code, -32602)
+  assert.equal(world.fake.commands('Fetch.continueRequest').length, 2)
+})
+
+test('a client cannot have the browser read a file path for it, or choose where a download goes', async () => {
+  const world = await setup()
+  const a = await pageSession(world, 'a')
+  const refused = async (method, params) => {
+    const answer = await a.client.call(method, params, a.sessionId)
+    assert.equal(answer.error?.code, -32601, method)
+    assert.match(answer.error.message, /not available on a shared browser/)
+  }
+
+  // A path in the browser's file system read into the page (Playwright uploads from a remote client as buffers).
+  await refused('DOM.setFileInputFiles', { files: ['/proc/1/environ'], objectId: 'x' })
+  await refused('DOM.setFileInputFiles', { files: [], objectId: 'x' })
+  await refused('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: '/tmp' })
+  // A drag of a file from the machine into the page.
+  await refused('Input.dispatchDragEvent', { type: 'drop', x: 1, y: 1, data: { items: [], files: ['/etc/passwd'] } })
+
+  // A drag of what is on the page is ordinary input.
+  const ok = await a.client.call(
+    'Input.dispatchDragEvent',
+    { type: 'drop', x: 1, y: 1, data: { items: [] } },
+    a.sessionId
+  )
+  assert.equal(ok.error, undefined)
+  assert.equal(world.fake.commands('DOM.setFileInputFiles').length, 0)
+  assert.equal(world.fake.commands('Page.setDownloadBehavior').length, 0)
 })
 
 test('Target.createTarget passes only what a page needs, and only into the run’s own context', async () => {
@@ -423,7 +538,7 @@ test('ending a run closes its clients and disposes its context', async () => {
   await a.attach()
 
   await scope.disposeRun('a')
-  assert.deepEqual(a.client.closes, [{ code: 4001, reason: 'The run ended' }])
+  assert.deepEqual(a.client.closes, [{ code: 4001, reason: 'The slot was released' }])
   assert.equal(fake.contexts.has(a.contextId), false)
   assert.equal(
     [...fake.targets.values()].some((target) => target.browserContextId === a.contextId),

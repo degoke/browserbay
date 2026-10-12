@@ -14,15 +14,18 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertSecureRelayUrl, startAgent } from './agent.mjs'
-import { chromiumArgs, findChromium } from './chromium.mjs'
+import { chromiumArgs, chromiumEnv, findChromium } from './chromium.mjs'
 import { createPipeUpstream } from './pipe-upstream.mjs'
 import { createCdpScope } from './scope.mjs'
 
 /** A setting the operator has to fix (as opposed to a browser that failed to start). Callers exit with status 2. */
-export class ConfigError extends Error {}
+export class ConfigError extends Error {
+  name = 'ConfigError'
+}
 
 const CHROMIUM_START_TIMEOUT_MS = 30_000
 const CHROMIUM_STOP_GRACE_MS = 3000
+const CONNECT_REPORT_MS = 15_000
 
 /**
  * @param {object} options
@@ -54,7 +57,9 @@ export async function startBrowserNode(options) {
 
   // DevTools over a pipe (fds 3 and 4): no port, and no size limit on what a screenshot or an evaluate result may be.
   const chromium = spawn(executable, chromiumArgs({ profileDir, headless, sandbox }), {
-    stdio: ['ignore', 'ignore', 'inherit', 'pipe', 'pipe']
+    stdio: ['ignore', 'ignore', 'inherit', 'pipe', 'pipe'],
+    // Not the node's own environment: it holds this box's secrets, and pages the browser runs are not trusted with them.
+    env: chromiumEnv()
   })
 
   let agent
@@ -112,7 +117,15 @@ export async function startBrowserNode(options) {
     throw error
   }
 
-  logger.info?.(`node ${nodeId} ready: up to ${maxContexts} slots, relay ${new URL(relayUrl).origin}`)
+  // Not "ready" until the relay has accepted this node: a node that cannot join gives every client "no capacity".
+  agent
+    .whenConnected(CONNECT_REPORT_MS)
+    .then(() => logger.info?.(`node ${nodeId} ready: up to ${maxContexts} slots, relay ${new URL(relayUrl).origin}`))
+    .catch(() =>
+      logger.warn?.(
+        `node ${nodeId} is running but not yet accepted by the relay at ${new URL(relayUrl).origin}: still trying (check the relay address and the enrollment secret)`
+      )
+    )
 
   return {
     exited,

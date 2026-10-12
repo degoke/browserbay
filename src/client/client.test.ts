@@ -129,7 +129,7 @@ function fakeBox(
 }
 
 function client(fetchImpl: typeof fetch, options: Partial<BrowserBoxOptions> = {}) {
-  return createBrowserBox({ url: BOX, apiKey: API_KEY, fetch: fetchImpl, now: () => NOW, ...options })
+  return createBrowserBox({ url: BOX, apiKey: API_KEY, fetch: fetchImpl, now: () => NOW, retryDelayMs: 0, ...options })
 }
 
 const acquireOptions = (runId: string, extra: { waitMs?: number } = {}) => ({
@@ -150,6 +150,29 @@ test('client: refuses an address or key it cannot use, up front', () => {
   assert.throws(() => createBrowserBox({ url: 'not a url', apiKey: API_KEY }), /not a URL/)
   assert.throws(() => createBrowserBox({ url: 'ftp://browsers.example.com', apiKey: API_KEY }), /http\(s\)/)
   assert.throws(() => createBrowserBox({ url: BOX, apiKey: '' }), /apiKey/)
+})
+
+test('client: refuses a namespace that could be mistaken for another, a bad run id, and a lifetime the box would refuse', async () => {
+  for (const namespace of ['app:staging', 'has space', 'a/b', 'é']) {
+    assert.throws(() => createBrowserBox({ url: BOX, apiKey: API_KEY, namespace }), /namespace/, namespace)
+  }
+  for (const namespace of ['production', 'eu-west_1.app']) createBrowserBox({ url: BOX, apiKey: API_KEY, namespace })
+
+  const box = fakeBox()
+  const service = client(box.impl, { namespace: 'production' })
+  for (const runId of ['', 'x'.repeat(200)]) {
+    await assert.rejects(() => service.acquire({ runId, maxLifetimeSeconds: 600 }), /runId must be/, runId.slice(0, 5))
+  }
+  for (const maxLifetimeSeconds of [0, 59, 86_401, 1.5, Number.NaN, '600' as unknown as number]) {
+    await assert.rejects(
+      () => service.acquire({ runId: 'ok', maxLifetimeSeconds }),
+      /maxLifetimeSeconds must be a whole number from 60 to 86400/,
+      String(maxLifetimeSeconds)
+    )
+  }
+  assert.equal(box.calls.length, 0, 'nothing was asked of the box to find that out')
+  await service.acquire({ runId: 'x'.repeat(200 - 'production:'.length), maxLifetimeSeconds: 60 })
+  await service.acquire({ runId: 'ok', maxLifetimeSeconds: 86_400 })
 })
 
 test('client: asks the box for a slot with the API key, the wait and the maximum lifetime', async () => {
@@ -311,6 +334,24 @@ test('client: a stored slot comes back to life without a request, and says where
   assert.throws(() => client(box.impl).slot({ ...stored, url: 'not a url' }), /not a URL/)
 })
 
+test('client: a stored slot that names another box is not trusted with the API key or the slot token, unless allowed', async () => {
+  const box = fakeBox()
+  const service = client(box.impl)
+  const stored = { slotId: 'slot-1', token: 'a-slot-token', url: 'https://attacker.example.net' }
+
+  assert.throws(() => service.slot(stored), /not on this client's box/)
+  await assert.rejects(() => service.release('slot-1', { url: stored.url }), /Its credentials are only sent to the box/)
+  assert.equal(box.calls.length, 0, 'nothing was sent anywhere')
+
+  // The same box under another spelling is the same box; another path on the host is another box.
+  assert.equal(service.slot({ ...stored, url: `${BOX}/` }).url, BOX)
+  assert.throws(() => service.slot({ ...stored, url: `${BOX}/other-prefix` }), /not on this client's box/)
+  assert.equal(service.slot({ slotId: 'slot-1', token: 't' }).url, BOX, 'no address means this client’s box')
+
+  const trusting = client(box.impl, { allowOtherBoxes: true })
+  assert.equal(trusting.slot(stored).url, stored.url)
+})
+
 test('client: a stored slot is released at the box it names, with the API key', async () => {
   const box = fakeBox()
   const slot = await client(box.impl).acquire(acquireOptions('run-1'))
@@ -325,7 +366,7 @@ test('client: a stored slot is released at the box it names, with the API key', 
 
   // The box moved since the slot was stored: the slot still decides where it lives.
   const elsewhere = fakeBox()
-  await client(elsewhere.impl, { url: 'https://new-box.example.com' }).slot(stored).release()
+  await client(elsewhere.impl, { url: 'https://new-box.example.com', allowOtherBoxes: true }).slot(stored).release()
   assert.equal(elsewhere.calls[0]!.url.href, `${BOX}/v1/slots/slot-1`)
   assert.equal(elsewhere.calls[0]!.headers.Authorization, `Bearer ${API_KEY}`)
 })
@@ -535,7 +576,7 @@ test('client: a slot can be released by its id alone, at the box named, and fail
   assert.equal(box.calls[0]!.headers.Authorization, `Bearer ${API_KEY}`)
 
   const elsewhere = fakeBox()
-  await client(elsewhere.impl).release('x', { url: 'https://other.example.com/' })
+  await client(elsewhere.impl, { allowOtherBoxes: true }).release('x', { url: 'https://other.example.com/' })
   assert.equal(elsewhere.calls[0]!.url.href, 'https://other.example.com/v1/slots/x')
 
   await client(fakeBox({ deleteStatus: () => 404 }).impl).release('already-gone')

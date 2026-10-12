@@ -357,3 +357,80 @@ test('one run cannot reach another run’s browser', { skip: !enabled }, async (
     await shared.close()
   }
 })
+
+test(
+  'a slot is held to the web: no file:, no browser internals, no file paths read into a page',
+  { skip: !enabled },
+  async () => {
+    const shared = await startSharedChromium()
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html' })
+      response.end('<!doctype html><title>upload</title><input id="f" type="file">')
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    try {
+      const run = await shared.open('run-held', origin)
+      const refused = /cannot be opened on a shared browser/
+
+      // What a person at a keyboard would try first: type the address of a local file or an internal page.
+      for (const url of [
+        'file:///etc/hosts',
+        'view-source:file:///etc/hosts',
+        'chrome://inspect/#pages',
+        'chrome://version',
+        'about:version'
+      ]) {
+        await assert.rejects(run.page.goto(url, { timeout: 8_000 }), refused, url)
+        assert.equal(new URL(run.page.url()).origin, origin, `${url} did not move the page`)
+      }
+      // The same through a new tab, and through the protocol directly.
+      await assert.rejects(
+        run.context.newPage().then((page) => page.goto('file:///etc/hosts')),
+        refused
+      )
+      const raw = rawSocket(shared.endpointOf('run-held'))
+      await raw.opened
+      const created = await raw.send('Target.createTarget', { url: 'file:///etc/hosts' })
+      assert.match(created.error?.message ?? '', refused)
+
+      // A file path read into the page by the browser is refused; Playwright's buffer upload (how a remote client uploads) works.
+      const { targetInfos } = (await raw.send('Target.getTargets')).result as {
+        targetInfos: Array<{ targetId: string; type: string; url: string }>
+      }
+      const target = targetInfos.find((info) => info.type === 'page' && info.url.startsWith(origin))!
+      const { sessionId } = (await raw.send('Target.attachToTarget', { targetId: target.targetId, flatten: true }))
+        .result as { sessionId: string }
+      const { root } = (await raw.send('DOM.getDocument', {}, sessionId)).result as { root: { nodeId: number } }
+      const { nodeId } = (await raw.send('DOM.querySelector', { nodeId: root.nodeId, selector: '#f' }, sessionId))
+        .result as { nodeId: number }
+      const byPath = await raw.send('DOM.setFileInputFiles', { files: ['/etc/hosts'], nodeId }, sessionId)
+      assert.match(byPath.error?.message ?? '', /not available on a shared browser/)
+      raw.close()
+
+      await run.page.setInputFiles('#f', {
+        name: 'cv.pdf',
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4 hello')
+      })
+      assert.equal(
+        await run.page.evaluate(() => (document.getElementById('f') as HTMLInputElement).files![0]!.size),
+        14
+      )
+
+      // Refusing is not breaking: the web still works afterwards.
+      await run.page.goto(`${origin}/after`)
+      assert.equal(await run.page.title(), 'upload')
+      await run.close()
+      // Every attempt above was refused by the hub and logged, and nothing else was.
+      const logged = (start: string) => shared.refused.filter((line) => line.startsWith(start)).length
+      assert.equal(logged('A navigation to a refused URL'), 6)
+      assert.equal(logged('A target on a refused URL'), 1)
+      assert.equal(logged('A session-level command was refused {"method":"DOM.setFileInputFiles"'), 1)
+      assert.equal(shared.refused.length, 8, shared.refused.join('\n'))
+    } finally {
+      server.close()
+      await shared.close()
+    }
+  }
+)

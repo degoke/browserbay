@@ -14,8 +14,10 @@ import {
 } from './registry.js'
 import {
   CLOSE,
+  NODE_LIMITS,
   NODE_PROTOCOL_VERSION,
   RELAY_PATHS,
+  SLOT_LIMITS,
   TOKEN_HEADER,
   type CreateSlotRequest,
   type CreateSlotResponse,
@@ -62,7 +64,7 @@ export interface RelayOptions {
 
 const MAX_BODY_BYTES = 16 * 1024
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024
-const NODE_ID = /^[\w.-]{1,100}$/
+const NODE_ID = NODE_LIMITS.nodeIdPattern
 
 const digest = (value: string) => createHash('sha256').update(value).digest()
 const safeEqual = (a: string, b: string) => timingSafeEqual(digest(a), digest(b))
@@ -144,7 +146,7 @@ export function createRelayServer(options: RelayOptions) {
     },
     onSlotRemoved(slotId, reason) {
       logger.info?.('Slot removed', { slotId, reason })
-      for (const socket of clientSockets.get(slotId) ?? []) socket.close(4001, 'The run ended')
+      for (const socket of clientSockets.get(slotId) ?? []) socket.close(4001, 'The slot was released')
     }
   })
 
@@ -213,10 +215,10 @@ export function createRelayServer(options: RelayOptions) {
     const valid =
       typeof runId === 'string' &&
       runId.length >= 1 &&
-      runId.length <= 200 &&
+      runId.length <= SLOT_LIMITS.maxRunIdLength &&
       Number.isInteger(maxLifetimeSeconds) &&
-      maxLifetimeSeconds! >= 60 &&
-      maxLifetimeSeconds! <= 86_400 &&
+      maxLifetimeSeconds! >= SLOT_LIMITS.minLifetimeSeconds &&
+      maxLifetimeSeconds! <= SLOT_LIMITS.maxLifetimeSeconds &&
       (waitMs === undefined || (Number.isInteger(waitMs) && waitMs >= 0))
     if (!valid) return fail(res, 400, 'invalid_request')
     // A caller that hangs up while waiting for capacity must not be given a slot nobody will ever release.
@@ -292,7 +294,7 @@ export function createRelayServer(options: RelayOptions) {
           NODE_ID.test(message.nodeId) &&
           Number.isInteger(message.maxContexts) &&
           message.maxContexts >= 1 &&
-          message.maxContexts <= 100
+          message.maxContexts <= NODE_LIMITS.maxContexts
         if (!validHello) return void ws.close(CLOSE.unauthorized, 'Invalid hello')
         // A node and relay that disagree on the frames cannot work together; say so rather than fail obscurely later.
         if (message.version !== NODE_PROTOCOL_VERSION) {
@@ -321,6 +323,8 @@ export function createRelayServer(options: RelayOptions) {
         link.send({ t: 'welcome', heartbeatMs, version: NODE_PROTOCOL_VERSION })
         return
       }
+      // Authenticated, but still only a peer: a frame that is not an object ends nothing but itself.
+      if (typeof message !== 'object' || message === null) return
       switch (message.t) {
         case 'heartbeat':
           if (link)

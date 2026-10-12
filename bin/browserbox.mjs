@@ -15,12 +15,18 @@ const [command, ...args] = process.argv.slice(2)
 
 const secret = () => randomBytes(24).toString('base64url')
 
+const RELAY_NOT_BUILT =
+  'The relay is not built (dist/ is missing). In a checkout, run `pnpm build`; the Docker image has it built. ' +
+  'An install of browserbox from git has the client (`browserbox/client`), not the relay.'
+// Only the relay's own build being absent: a missing dependency is a different problem and says so itself.
+const isRelayMissing = (error) => error?.code === 'ERR_MODULE_NOT_FOUND' && /dist[\\/]relay/.test(String(error.message))
+
 try {
   await dispatch()
 } catch (error) {
-  // A bad setting should read as a sentence, not a stack trace.
+  // A bad setting should read as a sentence, not a stack trace; and as status 2, like a node's.
   console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
+  process.exit(error?.name === 'ConfigError' ? 2 : 1)
 }
 
 async function dispatch() {
@@ -36,8 +42,8 @@ async function dispatch() {
       try {
         main = await import('../dist/relay/main.js')
       } catch (error) {
-        if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error
-        console.error('The relay is not built. Run `pnpm build` first (the Docker image does this for you).')
+        if (!isRelayMissing(error)) throw error
+        console.error(RELAY_NOT_BUILT)
         process.exit(2)
       }
       await main.runRelay()
@@ -45,6 +51,12 @@ async function dispatch() {
     }
     case 'secret': {
       const name = args[0] ?? 'node'
+      if (!/^[\w.-]+$/.test(name)) {
+        console.error(
+          'The name may only contain letters, digits, "_", "." and "-" (it is what the relay calls the node in its logs).'
+        )
+        process.exit(2)
+      }
       const value = secret()
       const hash = createHash('sha256').update(value).digest('hex')
       console.log(`Give the node:   BROWSERBOX_ENROLLMENT_SECRET=${value}`)

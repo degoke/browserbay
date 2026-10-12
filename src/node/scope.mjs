@@ -15,6 +15,8 @@
  *     the same error as an id that does not exist.
  *   - A client disconnecting never disposes the run's context, so a later client sees the same pages. It does release
  *     everything the client held: a paused tab is resumed and its sessions are detached.
+ *   - What a client can ask the machine for is limited (no navigating to file: or chrome:, no file paths into a page, no
+ *     downloads). That keeps a browser's pages on the web; it does not make a client harmless. See "Trust" in the README.
  *
  * Plain Node, no dependencies, no sockets: the caller supplies the upstream connection and a transport per client,
  * so the same code is tested against a fake Chromium and run against a real one.
@@ -43,11 +45,36 @@ const SESSION_BROWSER_METHODS = new Set([
 ])
 const SESSION_TARGET_METHODS = new Set(['Target.setAutoAttach', 'Target.detachFromTarget'])
 /**
- * Browser-wide in their effect (they would observe or disturb other runs), and the apply flows never need them. IO
+ * Browser-wide in their effect (they would observe or disturb other runs), and ordinary page automation never needs them. IO
  * reads streams by a handle that is not tied to the session that was given it, so it is not offered at all (this
  * rules out page.pdf() and tracing on a shared browser).
  */
 const SESSION_DENIED_DOMAINS = new Set(['SystemInfo', 'Tracing', 'Storage', 'Memory', 'IO'])
+
+/**
+ * Methods a page session may not call because they hand the client something of the machine the browser runs on: a
+ * file path read into a page (`DOM.setFileInputFiles`; Playwright uploads from a remote client as buffers and does not
+ * need it), and a download whose destination the client could pick.
+ */
+const SESSION_DENIED_METHODS = new Set(['DOM.setFileInputFiles', 'Page.setDownloadBehavior'])
+
+/**
+ * Where a client may point a page. Navigating to file:, chrome:, devtools: or view-source: opens the node itself (its
+ * files, its browser's internal pages) and not the web, so only these are allowed. `about:` is only the blank page:
+ * `about:version` and friends redirect to chrome: pages.
+ */
+const NAVIGABLE_SCHEMES = new Set(['http:', 'https:', 'data:', 'blob:'])
+function navigableUrl(value) {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    if (url.protocol === 'about:') return url.pathname === 'blank' || url.pathname === 'srcdoc'
+    return NAVIGABLE_SCHEMES.has(url.protocol)
+  } catch {
+    return false
+  }
+}
+const URL_REFUSED = 'This URL cannot be opened on a shared browser'
 
 const CREATE_TARGET_PARAMS = ['url', 'width', 'height', 'newWindow', 'background']
 
@@ -334,6 +361,10 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
 
       case 'Target.createTarget': {
         if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) return notFound()
+        if (params.url !== undefined && !navigableUrl(params.url)) {
+          log('warn', 'A target on a refused URL was not created', { runKey: client.runKey })
+          return client.sendError(id, ERR_INVALID_PARAMS, URL_REFUSED)
+        }
         const allowed = Object.fromEntries(
           CREATE_TARGET_PARAMS.filter((key) => key in params).map((key) => [key, params[key]])
         )
@@ -433,6 +464,18 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) {
       return client.sendError(id, ERR_INVALID_PARAMS, 'Failed to find browser context', sessionId)
     }
+    if (SESSION_DENIED_METHODS.has(method) || (method === 'Input.dispatchDragEvent' && params.data?.files?.length)) {
+      log('warn', 'A session-level command was refused', { method, runKey: client.runKey })
+      return client.sendError(id, ERR_METHOD_NOT_FOUND, `${method} is not available on a shared browser`, sessionId)
+    }
+    // Page.navigate, and a request rewritten to another URL while it is paused (Fetch.continueRequest).
+    if (
+      (method === 'Page.navigate' || (method === 'Fetch.continueRequest' && params.url !== undefined)) &&
+      !navigableUrl(params.url)
+    ) {
+      log('warn', 'A navigation to a refused URL was blocked', { method, runKey: client.runKey })
+      return client.sendError(id, ERR_INVALID_PARAMS, URL_REFUSED, sessionId)
+    }
     if (method === 'Browser.getWindowForTarget') {
       if (params.targetId !== undefined && targets.get(params.targetId)?.browserContextId !== client.contextId) {
         return client.sendError(id, ERR_INVALID_PARAMS, 'No target with given id found', sessionId)
@@ -489,7 +532,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
 
   function connect(runKey, transport) {
     const run = runs.get(runKey)
-    if (!run) throw new Error('Unknown run')
+    if (!run) throw new Error('Unknown slot')
     const client = {
       runKey,
       contextId: run.contextId,
@@ -550,9 +593,16 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   }
 
   async function createRun(runKey) {
-    if (runs.has(runKey)) throw new Error('This run already has a browser context')
-    // disposeOnDetach:false, so a client disconnecting (a worker handing over to a person) leaves the context alone.
+    if (runs.has(runKey)) throw new Error('This slot already has a browser context')
+    // disposeOnDetach:false, so a client disconnecting (a service handing the browser to a person) leaves the context alone.
     const { browserContextId } = await request('Target.createBrowserContext', { disposeOnDetach: false })
+    // Files would land on this machine, outside any run's control. Denied from the start, not only if a client asks.
+    await request('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: false, browserContextId }).catch(
+      (error) => {
+        void request('Target.disposeBrowserContext', { browserContextId }).catch(ignore)
+        throw error
+      }
+    )
     runs.set(runKey, { contextId: browserContextId, controller: null, clients: new Set() })
     contextToRun.set(browserContextId, runKey)
     return { contextId: browserContextId }
@@ -563,7 +613,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     if (!run) return
     runs.delete(runKey)
     contextToRun.delete(run.contextId)
-    for (const client of [...run.clients]) evict(client, 4001, 'The run ended')
+    for (const client of [...run.clients]) evict(client, 4001, 'The slot was released')
     for (const [id, info] of targets) if (info.browserContextId === run.contextId) targets.delete(id)
     await request('Target.disposeBrowserContext', { browserContextId: run.contextId }).catch(ignore)
   }

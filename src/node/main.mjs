@@ -15,18 +15,33 @@
  * The process leaves when Chromium does, so give it a restart policy of "always".
  */
 import { hostname } from 'node:os'
+import { NODE_LIMITS } from '../protocol.js'
 import { ConfigError, startBrowserNode } from './browser-node.mjs'
 
 /** The settings of the browser itself, shared by `browserbox node` and the all-in-one `browserbox start`. */
 export function parseNodeSettings(env = process.env) {
   const maxContexts = Number(env.BROWSERBOX_MAX_CONTEXTS || 5)
-  if (!Number.isInteger(maxContexts) || maxContexts < 1) {
-    throw new Error('BROWSERBOX_MAX_CONTEXTS must be a whole number, at least 1.')
+  if (!Number.isInteger(maxContexts) || maxContexts < 1 || maxContexts > NODE_LIMITS.maxContexts) {
+    throw new Error(`BROWSERBOX_MAX_CONTEXTS must be a whole number from 1 to ${NODE_LIMITS.maxContexts}.`)
+  }
+  // The hostname is only a default: make it fit rather than refuse to start on a machine with an unusual one.
+  const nodeId =
+    env.BROWSERBOX_NODE_ID ||
+    hostname()
+      .replace(/[^\w.-]/g, '-')
+      .slice(0, 100) ||
+    'node'
+  if (!NODE_LIMITS.nodeIdPattern.test(nodeId)) {
+    throw new Error('BROWSERBOX_NODE_ID may only contain letters, digits, "_", "." and "-" (up to 100 characters).')
+  }
+  const drainSeconds = Number(env.BROWSERBOX_DRAIN_SECONDS ?? 120)
+  if (env.BROWSERBOX_DRAIN_SECONDS === '' || !Number.isFinite(drainSeconds) || drainSeconds < 0) {
+    throw new Error('BROWSERBOX_DRAIN_SECONDS must be a number of seconds, 0 or more.')
   }
   return {
-    nodeId: env.BROWSERBOX_NODE_ID || hostname(),
+    nodeId,
     maxContexts,
-    drainSeconds: Number(env.BROWSERBOX_DRAIN_SECONDS || 120),
+    drainSeconds,
     profileDir: env.BROWSERBOX_PROFILE_DIR || undefined,
     headless: env.BROWSERBOX_HEADLESS !== 'false',
     sandbox: env.BROWSERBOX_CHROMIUM_SANDBOX === 'true'

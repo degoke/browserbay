@@ -8,7 +8,7 @@ import { parseNodeEnv, parseNodeSettings } from './main.mjs'
 
 const SECRET = 'a-node-enrollment-secret'
 
-test('node settings: defaults, and every BROWSERBOX_ variable it reads', () => {
+test('node settings: the defaults, and each of the node’s own settings read from its variable', () => {
   const defaults = parseNodeSettings({})
   assert.equal(defaults.maxContexts, 5)
   assert.equal(defaults.drainSeconds, 120)
@@ -35,10 +35,27 @@ test('node settings: defaults, and every BROWSERBOX_ variable it reads', () => {
   })
 })
 
-test('node settings: a slot count that is not a whole number of at least one is refused', () => {
-  for (const value of ['0', '-1', '2.5', 'many']) {
-    assert.throws(() => parseNodeSettings({ BROWSERBOX_MAX_CONTEXTS: value }), /BROWSERBOX_MAX_CONTEXTS/, value)
+test('node settings: what the relay would refuse is refused here, at startup, with the setting named', () => {
+  // The relay accepts 1 to 100 slots and a node id of letters, digits and _ . - : anything else is refused on connect.
+  for (const value of ['0', '-1', '2.5', 'many', '101', '150']) {
+    assert.throws(
+      () => parseNodeSettings({ BROWSERBOX_MAX_CONTEXTS: value }),
+      /BROWSERBOX_MAX_CONTEXTS.*1 to 100/,
+      value
+    )
   }
+  assert.equal(parseNodeSettings({ BROWSERBOX_MAX_CONTEXTS: '100' }).maxContexts, 100)
+
+  for (const value of ['my laptop', 'a/b', 'node:1', 'é', 'x'.repeat(101)]) {
+    assert.throws(() => parseNodeSettings({ BROWSERBOX_NODE_ID: value }), /BROWSERBOX_NODE_ID/, value)
+  }
+  assert.equal(parseNodeSettings({ BROWSERBOX_NODE_ID: 'eu-west_1.node' }).nodeId, 'eu-west_1.node')
+  assert.ok(/^[\w.-]{1,100}$/.test(parseNodeSettings({}).nodeId), 'the default, from the hostname, always fits')
+
+  for (const value of ['abc', '-5', '', 'Infinity']) {
+    assert.throws(() => parseNodeSettings({ BROWSERBOX_DRAIN_SECONDS: value }), /BROWSERBOX_DRAIN_SECONDS/, value)
+  }
+  assert.equal(parseNodeSettings({ BROWSERBOX_DRAIN_SECONDS: '0' }).drainSeconds, 0, 'zero is "do not wait"')
 })
 
 test('a stand-alone node needs the relay address and a long enough enrollment secret', () => {

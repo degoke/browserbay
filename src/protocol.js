@@ -21,6 +21,22 @@ export const TOKEN_HEADER = 'x-browserbox-token'
 /** Bumped when the node <-> relay messages change incompatibly. The relay refuses a node that speaks another one. */
 export const NODE_PROTOCOL_VERSION = 1
 
+/** What the relay accepts in a node's hello. A node that exceeds them is refused (close code 4401, reason "Invalid hello"). */
+export const NODE_LIMITS = {
+  /** The most slots one node may offer. */
+  maxContexts: 100,
+  /** A node's name: letters, digits, `_`, `.` and `-`. Unique per node: a second one with the same name replaces the first. */
+  nodeIdPattern: /^[\w.-]{1,100}$/
+}
+
+/** What the relay accepts when a slot is requested (400 `invalid_request` otherwise). */
+export const SLOT_LIMITS = {
+  minLifetimeSeconds: 60,
+  maxLifetimeSeconds: 86_400,
+  /** `runId` length, in characters. A client's namespace prefix counts. */
+  maxRunIdLength: 200
+}
+
 export const RELAY_PATHS = {
   health: '/health',
   slots: '/v1/slots',

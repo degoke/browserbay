@@ -98,6 +98,7 @@ export function startAgent({
   let draining = false
   let closing = false
   let helloAcknowledged = false
+  let lastConnectionError = ''
   const waiters = new Set()
 
   const reports = () =>
@@ -133,19 +134,43 @@ export function startAgent({
     })
     socket.addEventListener('message', (event) => onControlMessage(event.data))
     socket.addEventListener('close', (event) => onControlClosed(socket, event))
-    // A failed connection is followed by a close event, which is where it is handled.
-    socket.addEventListener('error', () => undefined)
+    // A failed connection is followed by a close event, which is where it is handled; this only keeps what it said.
+    socket.addEventListener('error', (event) => {
+      lastConnectionError = String(event?.message || event?.error?.cause?.code || event?.error?.message || '')
+    })
   }
 
   function onControlClosed(socket, event) {
     if (socket !== control) return
+    const wasConnected = helloAcknowledged
     control = null
     helloAcknowledged = false
     clearInterval(heartbeatTimer)
     if (closing) return
-    if (event?.code === CLOSE.unauthorized) log('warn', 'The relay rejected this node’s enrollment secret')
-    if (event?.code === CLOSE.unsupportedVersion)
+    const reason = String(event?.reason ?? '')
+    if (event?.code === CLOSE.unauthorized && /invalid hello/i.test(reason)) {
+      log('warn', 'The relay refused this node: its id or slot count is not valid for this relay', {
+        nodeId,
+        maxContexts
+      })
+    } else if (event?.code === CLOSE.unauthorized) {
+      log('warn', 'The relay rejected this node’s enrollment secret')
+    } else if (event?.code === CLOSE.unsupportedVersion) {
       log('warn', 'The relay speaks a different protocol version than this node')
+    } else if (event?.code === CLOSE.replaced) {
+      log('warn', 'Another node with this id connected to the relay and took its place: is the node id unique?', {
+        nodeId
+      })
+    } else if (wasConnected) {
+      log('warn', 'Lost the connection to the relay; reconnecting', { code: event?.code })
+    } else if (attempt < 3 || attempt % 10 === 0) {
+      // Never got in: the address, the network and TLS are the usual causes. Said at the start and now and then.
+      log('warn', 'Could not connect to the relay; retrying', {
+        relay: new URL(relayUrl).origin,
+        attempt: attempt + 1,
+        ...(lastConnectionError ? { error: lastConnectionError } : {})
+      })
+    }
     const delay = Math.min(reconnectMaxMs, reconnectMinMs * 2 ** attempt) * (0.5 + random() / 2)
     attempt++
     reconnectTimer = setTimeout(connect, delay)
@@ -159,6 +184,7 @@ export function startAgent({
     } catch {
       return
     }
+    if (typeof message !== 'object' || message === null) return
     switch (message.t) {
       case 'welcome':
         if (message.version !== undefined && message.version !== NODE_PROTOCOL_VERSION) {
