@@ -1,0 +1,91 @@
+{{- if eq .Values.mode "split" }}
+# Exactly one relay: the nodes' connections live in this process, and the registry is in its memory. Recreate (not a
+# rolling update) so two relays never run at once. Nodes reconnect by themselves within about 15 seconds.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "browserbay.fullname" . }}
+  labels:
+    {{- include "browserbay.labels" (dict "ctx" . "component" "relay") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "relay") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "browserbay.labels" (dict "ctx" . "component" "relay") | nindent 8 }}
+        {{- with .Values.relay.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.relay.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "browserbay.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: relay
+          image: {{ include "browserbay.image" (dict "image" .Values.relayImage "ctx" .) }}
+          imagePullPolicy: {{ .Values.relayImage.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8788
+          env:
+            - name: PORT
+              value: "8788"
+            - name: BROWSERBAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "browserbay.secretName" . }}
+                  key: apiKey
+            - name: BROWSERBAY_ENROLLMENT_SECRETS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "browserbay.secretName" . }}
+                  key: enrollmentSecrets
+            - name: BROWSERBAY_MAX_ACQUIRE_WAIT_MS
+              value: {{ int .Values.relay.maxAcquireWaitMs | toString | quote }}
+            {{- with .Values.relay.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 4
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+      {{- with .Values.relay.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

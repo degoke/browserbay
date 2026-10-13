@@ -1,0 +1,5 @@
+# Nodes reach the relay by its in-cluster Service, over plain http, on a network the operator trusts.
+node:
+  allowInsecureRelay: true
+  networkPolicy:
+    enabled: true

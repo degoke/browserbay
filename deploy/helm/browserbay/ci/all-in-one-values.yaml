@@ -1,0 +1,3 @@
+mode: allInOne
+allInOne:
+  acceptRemoteNodes: true
