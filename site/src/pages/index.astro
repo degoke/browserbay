@@ -177,69 +177,67 @@ const features = [
 
     <main>
       <section class="hero">
-        <div class="hero-head">
-          <p class="eyebrow">{EYEBROW}</p>
-          <h1>
-            {
-              TAGLINE.map((line, i) => (
-                <>
-                  <span class="beat">
-                    {i === TAGLINE.length - 1 ? (
-                      <>
-                        {line.slice(0, -1)}
-                        <span class="dot">.</span>
-                      </>
-                    ) : (
-                      line
-                    )}
-                  </span>
-                  {/* a real space between the lines: Astro's HTML compression drops whitespace between the spans */}
-                  {' '}
-                </>
-              ))
-            }
-          </h1>
-        </div>
-
         <div class="hero-body">
-        <div class="hero-copy">
-          <p class="lead">
-            browserbay runs isolated Chromium browsers on infrastructure you control: a VPS, a Raspberry Pi,
-            Kubernetes. Drive them with Playwright, Puppeteer or any agent over the DevTools protocol, and show a live
-            view in your own app so a person can watch and take over.
-          </p>
-          <div class="cta">
-            <a class="btn primary" href={docs('quick-start/')}>Quick start</a>
-            <a class="btn" href={GITHUB}>View on GitHub</a>
+          <div class="hero-copy">
+            <div class="hero-head">
+              <p class="eyebrow">{EYEBROW}</p>
+              <h1>
+                {
+                  TAGLINE.map((line, i) => (
+                    <>
+                      <span class="beat">
+                        {i === TAGLINE.length - 1 ? (
+                          <>
+                            {line.slice(0, -1)}
+                            <span class="dot">.</span>
+                          </>
+                        ) : (
+                          line
+                        )}
+                      </span>
+                      {/* a real space between the lines: Astro's HTML compression drops whitespace between the spans */}
+                      {' '}
+                    </>
+                  ))
+                }
+              </h1>
+            </div>
+            <p class="lead">
+              browserbay runs isolated Chromium browsers on infrastructure you control: a VPS, a Raspberry Pi,
+              Kubernetes. Drive them with Playwright, Puppeteer or any agent over the DevTools protocol, and show a live
+              view in your own app so a person can watch and take over.
+            </p>
+            <div class="cta">
+              <a class="btn primary" href={docs('quick-start/')}>Quick start</a>
+              <a class="btn" href={GITHUB}>View on GitHub</a>
+            </div>
           </div>
-        </div>
-
-        <figure class="bay" aria-label="Illustration of a box with six slots, some in use">
-          <div class="bay-head">
-            <span>node-1</span>
-            <span id="bay-count">2 of 6 slots in use</span>
-          </div>
-          <div class="slots" id="slots">
-            {
-              [
-                'task-42',
-                null,
-                'agent-7f3a',
-                null,
-                null,
-                null
-              ].map((run) => (
-                <div class="slot" data-run={run ?? ''} data-on={run ? '' : undefined}>
-                  <div class="slot-body">
-                    <span class="dots"><i></i><i class="bar"></i></span>
+          <figure class="bay" aria-label="Illustration of a box with six slots, some in use">
+            <div class="bay-head">
+              <span>node-1</span>
+              <span id="bay-count">2 of 6 slots in use</span>
+            </div>
+            <div class="slots" id="slots">
+              {
+                [
+                  'task-42',
+                  null,
+                  'agent-7f3a',
+                  null,
+                  null,
+                  null
+                ].map((run) => (
+                  <div class="slot" data-run={run ?? ''} data-on={run ? '' : undefined}>
+                    <div class="slot-body">
+                      <span class="dots"><i></i><i class="bar"></i></span>
+                    </div>
+                    <span class="slot-label">{run ?? 'free'}</span>
                   </div>
-                  <span class="slot-label">{run ?? 'free'}</span>
-                </div>
-              ))
-            }
-          </div>
-          <figcaption>Slots are leased, so a busy box frees itself.</figcaption>
-        </figure>
+                ))
+              }
+            </div>
+            <figcaption>Slots are leased, so a busy box frees itself.</figcaption>
+          </figure>
         </div>
       </section>
 
@@ -470,6 +468,8 @@ const features = [
     --display: 'Bricolage Grotesque Variable', 'Helvetica Neue', Arial, sans-serif;
     --body: 'Instrument Sans Variable', 'Helvetica Neue', Arial, sans-serif;
     --mono: 'DM Mono', ui-monospace, Menlo, monospace;
+    --gutter: 24px;
+    --shell: 1112px;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme='light']) {
@@ -540,12 +540,11 @@ const features = [
 
   /* shell */
   .nav,
-  main,
-  .foot {
+  main {
     width: 100%;
-    max-width: 1160px;
+    max-width: calc(var(--shell) + 2 * var(--gutter));
     margin-inline: auto;
-    padding-inline: 24px;
+    padding-inline: var(--gutter);
   }
   .nav {
     display: flex;
@@ -609,19 +608,23 @@ const features = [
 
   /* hero */
   .hero {
-    display: flex;
-    flex-direction: column;
-    gap: 44px;
     padding-block: 56px 88px;
   }
   .hero-body {
     display: grid;
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.7fr);
     gap: 56px;
     align-items: center;
   }
+  .hero-copy {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 28px;
+    min-width: 0;
+  }
   .hero h1 {
-    font-size: clamp(2.1rem, 6.2vw, 5rem);
+    font-size: clamp(1.9rem, 3.9vw, 3rem);
     line-height: 1;
     font-weight: 800;
     letter-spacing: -0.045em;
@@ -643,7 +646,6 @@ const features = [
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
-    margin-top: 32px;
   }
   .btn {
     display: inline-flex;
@@ -769,12 +771,9 @@ const features = [
   .raw,
   .deploy {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 56px;
     align-items: start;
-  }
-  .live {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
   .steps {
     list-style: none;
@@ -872,6 +871,8 @@ const features = [
 
   /* live view */
   .viewer-wrap {
+    position: sticky;
+    top: 24px;
     display: grid;
     gap: 12px;
     min-width: 0;
@@ -1115,7 +1116,6 @@ const features = [
     padding: 26px;
     display: grid;
     gap: 10px;
-    align-self: center;
   }
   .trust h3 {
     font-size: 1.35rem;
@@ -1172,6 +1172,8 @@ const features = [
     flex-wrap: wrap;
     gap: 16px;
     padding-block: 40px 56px;
+    width: min(100% - 2 * var(--gutter), var(--shell));
+    margin-inline: auto;
     border-top: 1px solid var(--line);
     margin-top: 8px;
   }
@@ -1195,11 +1197,15 @@ const features = [
     .hero {
       padding-block: 32px 64px;
     }
+    .hero h1 {
+      font-size: clamp(1.9rem, 6.4vw, 3.4rem);
+    }
     .section {
       padding-block: 56px;
     }
     .live .viewer-wrap {
       order: 2;
+      position: static;
     }
   }
   @media (max-width: 480px) {
@@ -1216,10 +1222,8 @@ const features = [
     .nav nav {
       gap: 8px 14px;
     }
-    .nav,
-    main,
-    .foot {
-      padding-inline: 16px;
+    :root {
+      --gutter: 16px;
     }
     .viewer-page {
       height: 300px;
