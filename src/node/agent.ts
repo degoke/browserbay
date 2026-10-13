@@ -34,17 +34,73 @@ const closeReason = (reason: unknown) => String(reason ?? '').slice(0, 100)
 
 const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|.*\.localhost)$/
 
+/** What kind of address a relay URL names, which decides whether the enrollment secret may be sent to it. */
+export type RelayAddress =
+  | 'tls' // https or wss
+  | 'loopback' // plain, but on this machine
+  | 'private' // plain, on a network that is not the public internet (private ranges, cluster-local names)
+  | 'public' // plain, anywhere else
+  | 'unsupported' // not http(s) or ws(s) at all
+
+const isPrivateIPv4 = (host: string) => {
+  const octets = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host)
+  if (!octets) return false
+  const [a, b] = [Number(octets[1]), Number(octets[2])]
+  // 10/8, 172.16/12, 192.168/16, link-local 169.254/16 and the shared range 100.64/10 (carrier-grade NAT, some clusters).
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  )
+}
+// fc00::/7 (unique local) and fe80::/10 (link-local). The URL parser has already written the address in full groups.
+const isPrivateIPv6 = (host: string) => /^\[(f[cd][0-9a-f]{2}|fe[89ab][0-9a-f]):/.test(host)
+// A single label ("relay", as a Service answers inside its namespace), or a name that only exists on a private network.
+const isPrivateName = (host: string) =>
+  (!host.includes('.') && !host.includes(':')) ||
+  /\.(svc|internal|local)$/.test(host) ||
+  host.endsWith('.svc.cluster.local')
+
+/** Classifies a relay URL. The one place that says what counts as TLS, loopback and private. */
+export function classifyRelayUrl(relayUrl: string): RelayAddress {
+  const url = new URL(relayUrl)
+  if (url.protocol === 'https:' || url.protocol === 'wss:') return 'tls'
+  if (url.protocol !== 'http:' && url.protocol !== 'ws:') return 'unsupported'
+  const host = url.hostname
+  if (LOOPBACK.test(host)) return 'loopback'
+  return isPrivateIPv4(host) || isPrivateIPv6(host) || isPrivateName(host) ? 'private' : 'public'
+}
+
 /**
  * The enrollment secret travels in the first frame, so the relay must be reached over TLS unless it is on this
- * machine. Throws for a plain ws:// or http:// address anywhere else.
+ * machine. Throws for a plain ws:// or http:// address anywhere else, unless `allowInsecure` is set: an explicit
+ * opt-in for a network the operator trusts (an in-cluster Service, a private link), where TLS is not wanted.
+ * `allowInsecure` only covers plain http and ws to a private address. A public address, or any other protocol, is
+ * still refused, so a wrong address cannot send the secret across the internet in the clear.
  */
-export function assertSecureRelayUrl(relayUrl: string): void {
-  const url = new URL(relayUrl)
-  const tls = url.protocol === 'https:' || url.protocol === 'wss:'
-  const plain = url.protocol === 'http:' || url.protocol === 'ws:'
-  if (!tls && !(plain && LOOPBACK.test(url.hostname))) {
-    throw new Error('The relay URL must use https (or wss) unless the relay runs on this machine')
+export function assertSecureRelayUrl(
+  relayUrl: string,
+  { allowInsecure = false }: { allowInsecure?: boolean } = {}
+): void {
+  const kind = classifyRelayUrl(relayUrl)
+  if (kind === 'tls' || kind === 'loopback' || (kind === 'private' && allowInsecure)) return
+  if (kind === 'public' && allowInsecure) {
+    throw new Error(
+      `The relay URL must use https (or wss): BROWSERBAY_ALLOW_INSECURE_RELAY only covers a relay on a private network (a private IP range, a single-label or .svc/.internal/.local name), and ${new URL(relayUrl).hostname} is not one`
+    )
   }
+  throw new Error(
+    'The relay URL must use https (or wss) unless the relay runs on this machine ' +
+      '(or BROWSERBAY_ALLOW_INSECURE_RELAY=true says the private network between them is trusted)'
+  )
+}
+
+/** True when the enrollment secret would travel without TLS to another machine: only the opt-in allows that. */
+export function sendsSecretInTheClear(relayUrl: string): boolean {
+  const kind = classifyRelayUrl(relayUrl)
+  return kind === 'private' || kind === 'public'
 }
 
 export interface AgentLogger {
@@ -55,6 +111,11 @@ export interface AgentLogger {
 export interface AgentOptions {
   /** The relay's base URL (http(s):// or ws(s)://), with any path prefix it is served under. */
   relayUrl: string
+  /**
+   * Allow a plain http or ws relay address on another machine. The enrollment secret then crosses that network
+   * without TLS, so this is only for one the operator trusts. A warning is logged whenever it is in effect.
+   */
+  allowInsecureRelay?: boolean
   enrollmentSecret: string
   nodeId: string
   /** What holds this node's browsers: a started scope hub in front of its Chromium, or a Chromium per slot. */
@@ -95,6 +156,7 @@ interface ConnectWaiter {
 
 export function startAgent({
   relayUrl,
+  allowInsecureRelay = false,
   enrollmentSecret,
   nodeId,
   scope,
@@ -111,7 +173,13 @@ export function startAgent({
   const log = (level: keyof AgentLogger, message: string, fields?: Record<string, unknown>) =>
     logger[level]?.(message, fields)
 
-  assertSecureRelayUrl(relayUrl)
+  assertSecureRelayUrl(relayUrl, { allowInsecure: allowInsecureRelay })
+  if (allowInsecureRelay && sendsSecretInTheClear(relayUrl)) {
+    log(
+      'warn',
+      `The enrollment secret is sent to ${new URL(relayUrl).origin} without TLS (BROWSERBAY_ALLOW_INSECURE_RELAY). Only do this on a network you trust.`
+    )
+  }
   const base = new URL(relayUrl)
   base.protocol = base.protocol === 'https:' || base.protocol === 'wss:' ? 'wss:' : 'ws:'
   const urlFor = (path: string) => {

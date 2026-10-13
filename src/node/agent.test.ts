@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
 import { WebSocket, WebSocketServer } from 'ws'
-import { assertSecureRelayUrl, startAgent, type Agent } from './agent.js'
+import { assertSecureRelayUrl, classifyRelayUrl, sendsSecretInTheClear, startAgent, type Agent } from './agent.js'
 import { createFakeChromium, type FakeChromium } from './fake-chromium.js'
 import { createCdpScope } from './scope.js'
 import { hashToken } from '../relay/registry.js'
@@ -775,6 +775,108 @@ test('a node will not send its enrollment secret over plain http to another mach
     /https/,
     'and starting an agent for one is refused before anything connects'
   )
+})
+
+test('the opt-in allows plain http or ws to a private network, and nothing else', () => {
+  const privateAddresses = [
+    'http://my-relay.ns.svc:8788',
+    'http://my-relay.ns.svc.cluster.local',
+    'http://relay:8788',
+    'http://relay.internal',
+    'http://nas.local:8788',
+    'ws://10.0.0.5:8788/prefix',
+    'http://172.16.0.1',
+    'http://172.31.255.254',
+    'http://192.168.1.20',
+    'http://169.254.20.10',
+    'http://100.64.0.7',
+    'http://[fd00::1]:8788',
+    'http://[fe80::1]:8788'
+  ]
+  for (const plain of privateAddresses) {
+    assert.throws(() => assertSecureRelayUrl(plain), /https/, `${plain} is refused by default`)
+    assert.doesNotThrow(() => assertSecureRelayUrl(plain, { allowInsecure: true }), plain)
+    assert.equal(classifyRelayUrl(plain), 'private', plain)
+    assert.equal(sendsSecretInTheClear(plain), true, `${plain} sends the secret in the clear`)
+  }
+  // A public address stays refused even with the opt-in: a wrong address must not send the secret across the internet.
+  for (const publicAddress of [
+    'http://relay.example.com',
+    'ws://relay.example.com:8788',
+    'http://8.8.8.8',
+    'http://172.32.0.1', // just outside 172.16/12
+    'http://172.15.255.255',
+    'http://100.128.0.1', // just outside 100.64/10
+    'http://relay.svc.evil.com', // only a name that ENDS in .svc is a Service name
+    'http://[2001:db8::1]:8788'
+  ]) {
+    assert.equal(classifyRelayUrl(publicAddress), 'public', publicAddress)
+    assert.throws(() => assertSecureRelayUrl(publicAddress), /https/, `${publicAddress} is refused by default`)
+    assert.throws(
+      () => assertSecureRelayUrl(publicAddress, { allowInsecure: true }),
+      /only covers a relay on a private network/,
+      `${publicAddress} is refused even with the opt-in`
+    )
+    assert.equal(sendsSecretInTheClear(publicAddress), true)
+  }
+  // Other protocols are refused too, and TLS and loopback need no opt-in.
+  for (const refused of ['ftp://relay.example.com', 'file:///relay', 'gopher://relay.internal']) {
+    assert.equal(classifyRelayUrl(refused), 'unsupported', refused)
+    assert.throws(() => assertSecureRelayUrl(refused, { allowInsecure: true }), /https/, refused)
+  }
+  for (const fine of [
+    'https://relay.example.com',
+    'wss://relay.example.com',
+    'http://127.0.0.1:8788',
+    'http://localhost'
+  ]) {
+    assert.doesNotThrow(() => assertSecureRelayUrl(fine, { allowInsecure: true }), fine)
+    assert.equal(sendsSecretInTheClear(fine), false, `${fine} does not send the secret in the clear`)
+  }
+  assert.throws(
+    () => assertSecureRelayUrl('http://relay.example.com'),
+    /BROWSERBAY_ALLOW_INSECURE_RELAY/,
+    'and the error says how'
+  )
+})
+
+test('with the opt-in a node dials a plain relay on another machine, and says it is doing so', async () => {
+  const urls: string[] = []
+  class Recorder {
+    readyState = 0
+    constructor(url: string) {
+      urls.push(url)
+    }
+    addEventListener() {}
+    send() {}
+    close() {}
+  }
+  const warnings: string[] = []
+  const options = {
+    relayUrl: 'http://relay.internal:8788',
+    enrollmentSecret: SECRET,
+    nodeId: 'n',
+    scope: {} as never,
+    logger: { warn: (message: string) => void warnings.push(message) },
+    WebSocketImpl: Recorder as unknown as typeof globalThis.WebSocket
+  }
+  assert.throws(() => startAgent(options), /https/, 'refused without the opt-in')
+  assert.throws(
+    () => startAgent({ ...options, relayUrl: 'http://relay.example.com', allowInsecureRelay: true }),
+    /only covers a relay on a private network/,
+    'and a public address is refused even with it'
+  )
+  assert.deepEqual(urls, [], 'and nothing was dialled')
+
+  const agent = startAgent({ ...options, allowInsecureRelay: true })
+  try {
+    assert.match(urls[0] ?? '', /^ws:\/\/relay\.internal:8788\//, 'the node dials the plain address')
+    assert.equal(warnings.filter((message) => /without TLS/.test(message)).length, 1, 'and warns once')
+    assert.ok(warnings[0]?.includes('http://relay.internal:8788'), 'naming the relay')
+    assert.ok(!warnings[0]?.includes(SECRET), 'but never the secret')
+  } finally {
+    await agent.close()
+  }
 })
 
 test('a relay that speaks another protocol version is warned about, and so is being refused for it', async () => {

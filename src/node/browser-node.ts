@@ -37,6 +37,8 @@ const CONNECT_REPORT_MS = 15_000
 
 export interface BrowserNodeOptions {
   relayUrl: string
+  /** Allow a plain http or ws relay address on another machine (see `AgentOptions.allowInsecureRelay`). */
+  allowInsecureRelay?: boolean
   enrollmentSecret: string
   nodeId: string
   maxContexts?: number
@@ -71,6 +73,7 @@ export interface BrowserNode {
 export async function startBrowserNode(options: BrowserNodeOptions): Promise<BrowserNode> {
   const {
     relayUrl,
+    allowInsecureRelay = false,
     enrollmentSecret,
     nodeId,
     maxContexts = 5,
@@ -84,7 +87,7 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
     throw new ConfigError('Chromium was not found. Use the browserbay image, or set BROWSERBAY_CHROMIUM_EXECUTABLE.')
   }
   try {
-    assertSecureRelayUrl(relayUrl)
+    assertSecureRelayUrl(relayUrl, { allowInsecure: allowInsecureRelay })
   } catch (error) {
     throw new ConfigError(`The relay URL is not usable: ${errorMessage(error)}`)
   }
@@ -147,7 +150,15 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
 
   try {
     if (processHost) {
-      agent = startAgent({ relayUrl, enrollmentSecret, nodeId, scope: processHost, maxContexts, logger })
+      agent = startAgent({
+        relayUrl,
+        allowInsecureRelay,
+        enrollmentSecret,
+        nodeId,
+        scope: processHost,
+        maxContexts,
+        logger
+      })
     } else {
       const pipe = createPipeUpstream({
         input: chromium!.stdio[4] as Readable,
@@ -168,7 +179,7 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
           ).unref()
         )
       ])
-      agent = startAgent({ relayUrl, enrollmentSecret, nodeId, scope, maxContexts, logger })
+      agent = startAgent({ relayUrl, allowInsecureRelay, enrollmentSecret, nodeId, scope, maxContexts, logger })
     }
   } catch (error) {
     await stop(errorMessage(error), true)
