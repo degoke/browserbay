@@ -1,6 +1,19 @@
-# browserbay
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/degoke/browserbay/main/brand/lockup-reverse.png">
+    <img src="https://raw.githubusercontent.com/degoke/browserbay/main/brand/lockup.png" alt="browserbay" width="380">
+  </picture>
+</h1>
 
-Browsers for AI agents and automation, as a service you deploy once and point any project at.
+<p align="center">
+  <a href="https://github.com/degoke/browserbay/actions/workflows/ci.yml"><img src="https://github.com/degoke/browserbay/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@degoke/browserbay"><img src="https://img.shields.io/npm/v/@degoke/browserbay" alt="npm version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+</p>
+
+**Run browsers anywhere. Watch them live. Drive them with any agent.**
+
+Self-hosted browsers for AI agents and automation, as a service you deploy once and point any project at. Docs and guides: **[browserbay.3adelabs.com](https://browserbay.3adelabs.com)**.
 
 You ask a box for a browser and get back a DevTools address and a token. What drives it is up to you: Playwright, Puppeteer, an AI agent loop, a screenshot service. The box does not know or care what is on the other end, which is what makes it reusable across projects.
 
@@ -30,7 +43,13 @@ Or with Compose, from a checkout: `export BROWSERBAY_API_KEY=$(openssl rand -bas
 
 ### Use it from Node
 
-The client is published as `@degoke/browserbay` on [GitHub Packages](https://github.com/degoke/browserbay/pkgs/npm/browserbay), already built. GitHub's npm registry needs the scope pointed at it and a personal access token with `read:packages`, even for a public package. Point the scope at it in your project's `.npmrc`:
+The client is published on npm as `@degoke/browserbay`, already built, so installing it needs no registry setup and no token:
+
+```sh
+pnpm add @degoke/browserbay
+```
+
+Every release is also published to [GitHub Packages](https://github.com/degoke/browserbay/pkgs/npm/browserbay), if you would rather install from there. That registry needs the scope pointed at it and a personal access token with `read:packages`, even for a public package. Point the scope at it in your project's `.npmrc`:
 
 ```ini
 @degoke:registry=https://npm.pkg.github.com
@@ -42,11 +61,7 @@ and keep the token in your user-level `~/.npmrc` (not in the project, so it is n
 //npm.pkg.github.com/:_authToken=<your token>
 ```
 
-```sh
-pnpm add @degoke/browserbay
-```
-
-In a Docker build, hand the token to the install step as a BuildKit secret, so it never lands in an image layer:
+In a Docker build that installs from GitHub Packages, hand the token to the install step as a BuildKit secret, so it never lands in an image layer:
 
 ```dockerfile
 RUN --mount=type=secret,id=npm_token \
@@ -76,6 +91,26 @@ try {
 ```
 
 `acquire` waits up to `waitMs` (default 30 s) for a free slot and throws `NoCapacityError` if the box stays full. `maxLifetimeSeconds` is 60 to 86400, and `runId` up to 200 characters. Puppeteer works the same way (`puppeteer.connect({ browserWSEndpoint: slot.cdpUrl, headers: slot.headers })`; checked with puppeteer-core), and anything else that speaks the Chrome DevTools Protocol should too.
+
+### Use it from Python or Go
+
+There are clients for both, with the same behaviour as the Node one and no dependencies beyond the standard library. A slot saved by one can be revived by another.
+
+```python
+from browserbay import BrowserBay  # pip install "git+https://github.com/degoke/browserbay.git#subdirectory=clients/python"
+
+box = BrowserBay("https://browsers.example.com", os.environ["BROWSERBAY_API_KEY"])
+with box.acquire(run_id="task-42", max_lifetime_seconds=1800) as slot:   # released on exit
+    browser = playwright.chromium.connect_over_cdp(slot.cdp_url, headers=slot.headers)
+```
+
+```go
+box, _ := browserbay.New(browserbay.Options{URL: "https://browsers.example.com", APIKey: key}) // go get github.com/degoke/browserbay/clients/go
+slot, err := box.Acquire(ctx, browserbay.AcquireOptions{RunID: "task-42", MaxLifetime: 30 * time.Minute})
+defer slot.Release(ctx)
+```
+
+See [`clients/python`](clients/python/README.md) and [`clients/go`](clients/go/README.md).
 
 ### Use it from anything else
 
@@ -143,6 +178,16 @@ It prints the key for the service (its client's `apiKey`) and the entry for the 
 - Names, hashes and namespaces must each be unique across the entries.
 - Slot tokens are unchanged: whoever holds a slot's token can drive that slot, whatever key made it.
 
+### Kubernetes
+
+A Helm chart in [`deploy/helm/browserbay`](deploy/helm/browserbay/README.md) runs one relay and the nodes as a separate Deployment, so the nodes scale on their own (by hand or with a HorizontalPodAutoscaler) without touching the relay. A node being removed finishes its browsers first. Nodes dial the relay's `https://` address, so serve the relay over HTTPS first (the chart has an ingress for it). It also has an `allInOne` mode: one pod that is a whole box.
+
+```sh
+helm install browserbay ./deploy/helm/browserbay -n browserbay --create-namespace \
+  --set node.relayUrl=https://browsers.example.com --set relay.ingress.enabled=true  # plus the ingress host and TLS
+kubectl -n browserbay scale deploy/browserbay-node --replicas=5
+```
+
 ### Split: a relay and nodes
 
 When you want browsers on several machines, run **one relay** and any number of nodes.
@@ -154,7 +199,7 @@ When you want browsers on several machines, run **one relay** and any number of 
    openssl rand -base64 24                                   # the API key
    ```
 
-   (From a checkout, `node dist/cli.js secret laptop` and `node dist/cli.js key` (after `pnpm build`) do the same. Do not use `npx browserbay`: this project is only published as `@degoke/browserbay` on GitHub Packages, so an unscoped `browserbay` from npmjs is not it.) The node gets the secret; the relay gets only its hash.
+   (From a checkout, `node dist/cli.js secret laptop` and `node dist/cli.js key` (after `pnpm build`) do the same. From the published package, use the scoped name: `npx @degoke/browserbay secret laptop`. An unscoped `npx browserbay` is not this package.) The node gets the secret; the relay gets only its hash.
 
 2. **Run the relay** (the `relay` image: no Chromium, about 230 MB). Exactly **one replica**: the nodes' sockets live in that process. Serve it over HTTPS with WebSocket support, at the root of its own hostname (or behind a proxy that strips a path prefix).
 
@@ -172,19 +217,20 @@ When you want browsers on several machines, run **one relay** and any number of 
      ghcr.io/degoke/browserbay node
    ```
 
-   | Variable                              | Default          | Meaning                                                                                                                                           |
-   | ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | `BROWSERBAY_RELAY_URL`                | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it. |
-   | `BROWSERBAY_ENROLLMENT_SECRET`        | —                | **Required**, at least 16 characters.                                                                                                             |
-   | `BROWSERBAY_NODE_ID`                  | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                 |
-   | `BROWSERBAY_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                          |
-   | `BROWSERBAY_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more (empty means the default).                                                 |
-   | `BROWSERBAY_ISOLATION`                | `context`        | `process` starts a Chromium per slot instead of one shared by all: see Isolation.                                                                 |
-   | `BROWSERBAY_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                    |
-   | `BROWSERBAY_HEADLESS`                 | `true`           | `false` for a headful browser (needs a display).                                                                                                  |
-   | `BROWSERBAY_PROFILE_DIR`              | a fresh temp dir | Chromium's profile. With `BROWSERBAY_ISOLATION=process`, the directory each slot's profile is made in (`<dir>/<slot id>`, removed with the slot). |
-   | `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see (see Trust). Never passes `BROWSERBAY_*`.                              |
-   | `BROWSERBAY_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                       |
+   | Variable                              | Default          | Meaning                                                                                                                                                                                                                                                                                                                                                                                          |
+   | ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | `BROWSERBAY_RELAY_URL`                | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine (or `BROWSERBAY_ALLOW_INSECURE_RELAY` is set), because the enrollment secret travels to it.                                                                                                                                                                                                  |
+   | `BROWSERBAY_ALLOW_INSECURE_RELAY`     | `false`          | `true` lets the relay address be plain `http://` or `ws://` when it is on a private network (a private IP range, a single-label name, or a `.svc`, `.internal` or `.local` name). The enrollment secret then crosses that network without TLS, so use it only on one you trust (a Kubernetes cluster's own network, say). A public address is still refused. A warning is logged on every start. |
+   | `BROWSERBAY_ENROLLMENT_SECRET`        | —                | **Required**, at least 16 characters.                                                                                                                                                                                                                                                                                                                                                            |
+   | `BROWSERBAY_NODE_ID`                  | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                                                                                                                                                                                                                                                                |
+   | `BROWSERBAY_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                                                                                                                                                                                                                                                                         |
+   | `BROWSERBAY_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more (empty means the default).                                                                                                                                                                                                                                                                                                |
+   | `BROWSERBAY_ISOLATION`                | `context`        | `process` starts a Chromium per slot instead of one shared by all: see Isolation.                                                                                                                                                                                                                                                                                                                |
+   | `BROWSERBAY_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                                                                                                                                                                                                                                                                   |
+   | `BROWSERBAY_HEADLESS`                 | `true`           | `false` for a headful browser (needs a display).                                                                                                                                                                                                                                                                                                                                                 |
+   | `BROWSERBAY_PROFILE_DIR`              | a fresh temp dir | Chromium's profile. With `BROWSERBAY_ISOLATION=process`, the directory each slot's profile is made in (`<dir>/<slot id>`, removed with the slot).                                                                                                                                                                                                                                                |
+   | `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see (see Trust). Never passes `BROWSERBAY_*`.                                                                                                                                                                                                                                                                             |
+   | `BROWSERBAY_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                                                                                                                                                                                                                                                                      |
 
    A box can also take remote nodes: set `BROWSERBAY_ENROLLMENT_SECRETS` on it and point the nodes at it. A node that cannot join says why in its log (an unreachable address, a wrong secret, an invalid id or slot count, a duplicate id) and keeps trying.
 
@@ -275,4 +321,18 @@ docker build --target relay -t browserbay-relay .    # the relay alone
 
 Layout: everything is TypeScript under `src/`, compiled to `dist/` by `pnpm build` (which an install from git also runs, as the package's `prepare` step). `src/protocol.ts` (the wire contract, shared), `src/relay/` (the relay), `src/node/` (Chromium launch, the scope hub, the relay agent), `src/client/` (the client), `src/box/` (the all-in-one), `src/cli.ts` (the `browserbay` command). Tests sit next to what they test (`*.test.ts`) and run straight from source; the CLI tests run the built `dist/cli.js`.
 
+The website (landing page and docs) is a separate Astro package in [`site/`](site/README.md), the logo files are in [`brand/`](brand/README.md), the Go and Python clients are in [`clients/`](clients), and the Helm chart is in [`deploy/helm/browserbay`](deploy/helm/browserbay/README.md). Each has its own checks in CI.
+
 When you change `src/node/scope.ts`, re-run `pnpm test:browser`. `src/node/fake-chromium.ts` stands in for Chromium in the unit tests and must stay in step with it. A hub test that passes is not proof: mutate the hub (resume popups early, skip release cleanup, unfiltered `Target.getTargets`) and check that a test notices.
+
+## Contributing
+
+Bug reports, fixes and ideas are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers how to build and test each part, and what fits in the project: it is a box that lends out browsers, and nothing on top of it. Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Changes are listed in the [changelog](CHANGELOG.md).
+
+## Security
+
+Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes, and not in a public issue. [Trust](#trust-what-a-slot-token-is-and-what-it-is-not) says what the box does and does not protect against.
+
+## License
+
+browserbay is released under the [MIT license](LICENSE). The Docker image also contains Chromium, Node.js and other software, each under its own license.

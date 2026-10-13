@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a change to the box, the clients, the chart or the docs.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        browserbay is a box that lends out browsers and nothing on top of it. Ideas about the box itself (isolation, scaling, reliability, deployment, the clients, the docs) fit. Agent loops, model calls, crawlers and screenshot or PDF endpoints do not: build those on top of `slot.cdpUrl`. See [CONTRIBUTING.md](https://github.com/degoke/browserbay/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: What you are doing and what gets in the way, before you suggest a fix.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else did you try?
+      description: Other ways to solve it, including doing it on top of the box.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is about the box (or its clients, chart or docs), not something to run on top of it.
+          required: true

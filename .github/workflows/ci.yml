@@ -24,6 +24,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # typecheck, format check, build, and the unit tests (no browser needed: the hub is tested against a fake Chromium)
       - run: pnpm run ci
+      # the package, packed and installed into an empty project, works (what a user gets from npm)
+      - run: pnpm check:package
 
   # The same paths against real Chromium, then the whole box as processes. The hub's isolation tests live here.
   browser:
@@ -40,6 +42,81 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+
+  # The website (landing page and docs) must build. It is its own package, with its own lockfile.
+  site:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+  # The Go and Python clients, with their own tests (no browser: they run against a fake box).
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - name: Go client
+        working-directory: clients/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./... -race -count=1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Python client
+        working-directory: clients/python
+        run: PYTHONPATH=src python -W error -m unittest discover -s tests
+
+  # The Helm chart must lint and render in every mode.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint and render
+        run: |
+          chart=deploy/helm/browserbay
+          for values in "$chart"/ci/*.yaml; do
+            echo "== $values"
+            helm lint "$chart" -f "$values" --strict
+            helm template ci "$chart" -f "$values" > /dev/null
+          done
+          # split mode without the relay's https address must refuse to render
+          if helm template ci "$chart" > /dev/null 2>&1; then echo "expected a failure without node.relayUrl"; exit 1; fi
+          # a misspelled setting must be an error (the values schema), not silently ignored
+          if helm template ci "$chart" -f "$chart/ci/split-values.yaml" --set node.networkpolicy.enabled=true > /dev/null 2>&1; then
+            echo "expected the values schema to reject a misspelled key"; exit 1
+          fi
+
+  # One version, written once in package.json: the chart's appVersion and the Python client must name the same one.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The chart and the Python client name the package's version
+        run: |
+          package=$(node -p "require('./package.json').version")
+          chart=$(sed -n "s/^appVersion: *['\"]*\([^'\"]*\)['\"]* *$/\1/p" deploy/helm/browserbay/Chart.yaml)
+          python=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' clients/python/src/browserbay/_version.py)
+          echo "package.json $package, chart appVersion $chart, python client $python"
+          test -n "$package" && test "$package" = "$chart" && test "$package" = "$python"
 
   # The images must build, and the relay image must answer.
   docker:

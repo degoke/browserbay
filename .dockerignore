@@ -5,3 +5,7 @@ dist
 test
 *.md
 !README.md
+site
+brand
+clients
+deploy
