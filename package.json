@@ -64,7 +64,7 @@
     "zod": "^3.24.3"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.5",
     "@types/ws": "^8.18.2",
     "playwright": "1.62.1",
     "prettier": "^3.5.3",
