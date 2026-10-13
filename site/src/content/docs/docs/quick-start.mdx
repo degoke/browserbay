@@ -1,0 +1,147 @@
+---
+title: Quick start
+description: Run a box, install a client and drive your first browser.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components'
+
+## Run a box
+
+<Steps>
+
+1. **Start it.**
+
+   ```sh
+   export BROWSERBAY_API_KEY="$(openssl rand -base64 24)"   # keep it: your projects present it
+   docker run -d --name browserbay --restart always --init --stop-timeout 130 \
+     -p 127.0.0.1:8788:8788 -e BROWSERBAY_API_KEY \
+     ghcr.io/degoke/browserbay
+   ```
+
+   That one container is a complete box: the relay and a Chromium node together. It listens on this machine only (`127.0.0.1`). `--stop-timeout 130` is the 120 seconds a stopping node gives slots in use, plus a margin. On Kubernetes, use the [Helm chart](/docs/deploy/kubernetes/) instead.
+
+2. **Check it is up.**
+
+   ```sh
+   curl http://127.0.0.1:8788/health
+   curl -H "Authorization: Bearer $BROWSERBAY_API_KEY" http://127.0.0.1:8788/v1/nodes
+   ```
+
+   `/health` says the relay is up. `/v1/nodes` shows the Chromium node and how many slots it has free.
+
+</Steps>
+
+<Aside type="caution">
+  Put the box behind HTTPS (your platform's proxy, Caddy, a tunnel) before anything outside the machine talks to it. The
+  API key and slot tokens travel to it.
+</Aside>
+
+## Install a client
+
+<Tabs>
+  <TabItem label="Node">
+    It is published on npm as `@degoke/browserbay`, already built, so installing it needs no registry setup and no token:
+
+    ```sh
+    pnpm add @degoke/browserbay playwright
+    ```
+
+    Every release is also on [GitHub Packages](https://github.com/degoke/browserbay/pkgs/npm/browserbay). To install from there, point the `@degoke` scope at `https://npm.pkg.github.com` in `.npmrc` and use a personal access token with `read:packages`.
+
+    Use the scoped name. An unscoped `npx browserbay` is not this package: the command is `npx @degoke/browserbay`.
+
+  </TabItem>
+  <TabItem label="Python">
+    ```sh
+    pip install "git+https://github.com/degoke/browserbay.git#subdirectory=clients/python" playwright
+    ```
+
+    The Python client uses only the standard library. See the [Python client](/docs/reference/python/).
+
+  </TabItem>
+  <TabItem label="Go">
+    ```sh
+    go get github.com/degoke/browserbay/clients/go
+    ```
+
+    The Go client uses only the standard library. See the [Go client](/docs/reference/go/).
+
+  </TabItem>
+</Tabs>
+
+## Take a browser and drive it
+
+<Tabs>
+  <TabItem label="Node">
+    ```js
+    import { chromium } from 'playwright'
+    import { createBrowserBay } from '@degoke/browserbay/client'
+
+    const box = createBrowserBay({
+      url: 'http://127.0.0.1:8788',
+      apiKey: process.env.BROWSERBAY_API_KEY
+    })
+
+    const slot = await box.acquire({ runId: 'task-42', maxLifetimeSeconds: 30 * 60 })
+    try {
+      const browser = await chromium.connectOverCDP(slot.cdpUrl, { headers: slot.headers })
+      const context = browser.contexts()[0] // your slot's context: use it, do not create another
+      const page = context.pages()[0] ?? (await context.newPage())
+      await page.goto('https://example.com')
+      console.log(await page.title())
+    } finally {
+      await slot.release()
+    }
+    ```
+
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import os
+    from browserbay import BrowserBay
+    from playwright.sync_api import sync_playwright
+
+    box = BrowserBay("http://127.0.0.1:8788", os.environ["BROWSERBAY_API_KEY"])
+
+    with sync_playwright() as p, box.acquire(run_id="task-42", max_lifetime_seconds=1800) as slot:
+        browser = p.chromium.connect_over_cdp(slot.cdp_url, headers=slot.headers)
+        page = browser.contexts[0].new_page()  # the slot's own context
+        page.goto("https://example.com")
+        print(page.title())
+    # leaving the with block releases the browser
+    ```
+
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    box, err := browserbay.New(browserbay.Options{
+    	URL:    "http://127.0.0.1:8788",
+    	APIKey: os.Getenv("BROWSERBAY_API_KEY"),
+    })
+    if err != nil {
+    	log.Fatal(err)
+    }
+
+    slot, err := box.Acquire(ctx, browserbay.AcquireOptions{
+    	RunID:       "task-42",
+    	MaxLifetime: 30 * time.Minute,
+    })
+    if err != nil {
+    	log.Fatal(err)
+    }
+    defer slot.Release(ctx)
+
+    // Hand slot.CDPURL and slot.Headers() to playwright-go, chromedp or a WebSocket library.
+    fmt.Println(slot.CDPURL)
+    ```
+
+  </TabItem>
+</Tabs>
+
+`acquire` waits up to 30 seconds for a free slot and fails with a no-capacity error if the box stays full. The maximum lifetime is the lease: the browser closes itself after that long even if your process crashed. See [Concepts](/docs/concepts/) for the vocabulary and [Drive a browser](/docs/guides/drive-a-browser/) for Puppeteer and plain DevTools.
+
+## Next
+
+- Let a person watch the browser: [Live view](/docs/guides/live-view/).
+- Put browsers on more than one machine: [Relay and nodes](/docs/deploy/split/), or on Kubernetes with [the Helm chart](/docs/deploy/kubernetes/).
+- Before you hand slot tokens to anyone: [Trust and isolation](/docs/security/trust/).

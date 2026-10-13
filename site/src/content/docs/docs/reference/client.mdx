@@ -1,0 +1,92 @@
+---
+title: Node client
+description: The Node client, @degoke/browserbay/client.
+---
+
+```js
+import {
+  createBrowserBay,
+  NoCapacityError,
+  QuotaExceededError,
+  ForbiddenError,
+  BrowserBayError
+} from '@degoke/browserbay/client'
+```
+
+There are also a [Python client](/docs/reference/python/) and a [Go client](/docs/reference/go/), with the same behaviour. Anything else can use the [HTTP API](/docs/reference/http-api/).
+
+## createBrowserBay
+
+```ts
+const box = createBrowserBay({
+  url,              // the box's base URL, e.g. https://browsers.example.com
+  apiKey,           // the box's API key
+  namespace?,       // mark this project's slots (letters, digits, _ . -)
+  allowOtherBoxes?, // string[] | true: other boxes a stored slot may name
+  logger?,          // { warn?(message, fields?) }
+  fetch?,           // your own fetch
+  now?              // your own clock
+})
+```
+
+`url` may carry a path prefix, which is kept. The API key and slot tokens are only ever sent to the box the client was created for, or to a box in `allowOtherBoxes`.
+
+## box
+
+| Method                                                | Returns         | Does                                                                                  |
+| ----------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------- |
+| `box.acquire({ runId, maxLifetimeSeconds, waitMs? })` | `Slot`          | Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait. |
+| `box.slot(stored)`                                    | `Slot`          | A slot from what you saved earlier. Makes no request.                                 |
+| `box.release(slotId, { url? })`                       | `void`          | Releases a slot you only know the id of. Idempotent.                                  |
+| `box.list()`                                          | `SlotSummary[]` | Slots, only this namespace's if you set one. No tokens.                               |
+| `box.nodes()`                                         | `NodeSummary[]` | Nodes, their capacity and load.                                                       |
+| `box.reap({ isLive, graceMs?, skip? })`               | `number`        | Releases slots whose owner `isLive` says is gone. Returns how many.                   |
+
+### acquire options
+
+| Option               | Meaning                                                                                                                         |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `runId`              | Your id for what the browser is for. Up to 200 characters, including the namespace.                                             |
+| `maxLifetimeSeconds` | The lease. The browser closes itself after this long. 60 to 86400.                                                              |
+| `waitMs`             | How long to wait for a free slot. Default 30000. Whole milliseconds. `0` means do not wait. The box caps it at its own maximum. |
+
+## slot
+
+| Member                       | Meaning                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `slot.cdpUrl`                | The DevTools WebSocket address.                                                                               |
+| `slot.headers`               | Headers every DevTools connection must carry, including the slot token. A fresh object each time.             |
+| `slot.slotId`, `slot.nodeId` | Identifiers.                                                                                                  |
+| `slot.token`                 | The slot token. A secret.                                                                                     |
+| `slot.isAlive()`             | `true` while the slot's browser is reachable. Never throws. A box that cannot be asked counts as "not alive". |
+| `slot.release()`             | Closes the browser. Idempotent.                                                                               |
+| `JSON.stringify(slot)`       | What to save to come back later. It contains the token: store it like a secret.                               |
+
+## Summaries
+
+```ts
+SlotSummary = { slotId, runId, nodeId, createdAt }
+NodeSummary = { nodeId, maxContexts, contexts, draining, lastSeenAt }
+```
+
+## Errors
+
+`BrowserBayError` is the base class. It has a `status` with the HTTP status when the box answered.
+
+`NoCapacityError` extends it, with status `503`. Every node is full, or none is connected.
+
+`QuotaExceededError` extends it, with status `429`: the API key's quota of browsers is used up. It is answered at once, without waiting.
+
+`ForbiddenError` extends it, with status `403`: the API key is confined to a namespace and the run id is outside it. Make the client with the matching `namespace`. A confined key also cannot list nodes.
+
+## reap
+
+```ts
+box.reap({
+  isLive(runId): Promise<boolean>,  // does this run still need its browser? runId has no namespace
+  graceMs?: number,                 // a slot younger than this is never reaped; default 180000
+  skip?(runId): boolean             // run ids nothing can vouch for
+})
+```
+
+See [Hand off and clean up](/docs/guides/hand-off/) for when to use it.

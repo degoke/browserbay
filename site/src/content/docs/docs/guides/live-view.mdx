@@ -1,0 +1,132 @@
+---
+title: Live view
+description: Let a person watch a browser and click and type in it, then hand it back to your service.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+Live view is a person watching a slot and steering it while your service is away. A support agent takes over a stuck checkout. A reviewer watches an agent run. A user finishes a login that your automation cannot.
+
+browserbay does not ship a viewer window. It makes the pieces a viewer needs safe to build: a second connection to the same slot that does not push your driver off, a stream of frames, and input that lands in the page.
+
+## How it works
+
+A slot's DevTools endpoint accepts more than one connection.
+
+- **Your service** connects with Playwright or Puppeteer. That is the _driver_.
+- **The viewer** opens a second connection to the same `slot.cdpUrl`. It asks Chromium for a screencast, a stream of JPEG frames, and sends mouse and key events back.
+- The viewer does **not** displace the driver. Only a newer connection that takes over the page's targets (which is what Playwright and Puppeteer do when they connect) supersedes an older driver. A viewer that only watches and sends input leaves the driver alone.
+- When the person steps away, your service reconnects and finds the same pages, in the state they left them.
+
+```
+person's browser ◀──frames── your viewer server ◀── slot.cdpUrl ──▶ the slot
+                 ──clicks──▶                     ──input events──▶
+your service (Playwright)  ─────────────────────── slot.cdpUrl ──▶ the same slot
+```
+
+<Aside type="caution" title="Keep the slot token on your server">
+  Browsers cannot set headers on a WebSocket, and the token must not reach the person's browser anyway. Run the DevTools
+  connection on your server and give the person only your own channel: frames out, clicks and keys in.
+</Aside>
+
+## A viewer connection in Node
+
+This is the server side of a viewer, written against the [`ws`](https://www.npmjs.com/package/ws) package. It connects, finds the page, starts the screencast, passes each frame to you as a base64 JPEG, and sends input. Define `onFrame` to hand frames to your viewer.
+
+```js
+import WebSocket from 'ws'
+
+const ws = new WebSocket(slot.cdpUrl, { headers: slot.headers })
+await new Promise((resolve, reject) => (ws.once('open', resolve), ws.once('error', reject)))
+
+let nextId = 0
+const pending = new Map()
+let sessionId
+
+// Send a DevTools command and wait for its answer.
+const send = (method, params = {}, session) =>
+  new Promise((resolve, reject) => {
+    const id = ++nextId
+    pending.set(id, { resolve, reject })
+    ws.send(JSON.stringify({ id, method, params, sessionId: session }))
+  })
+
+ws.on('message', (data) => {
+  const message = JSON.parse(data.toString())
+  if (message.id) {
+    const waiting = pending.get(message.id)
+    pending.delete(message.id)
+    if (message.error) waiting?.reject(new Error(message.error.message))
+    else waiting?.resolve(message.result)
+  } else if (message.method === 'Page.screencastFrame') {
+    onFrame(message.params.data, message.params.metadata) // base64 JPEG: pass it to the person's browser
+    // Chromium sends the next frame only after the last one is acknowledged.
+    send('Page.screencastFrameAck', { sessionId: message.params.sessionId }, sessionId).catch(() => {})
+  }
+})
+
+// Find the slot's page and start watching it.
+const { targetInfos } = await send('Target.getTargets')
+const page = targetInfos.find((target) => target.type === 'page')
+if (!page) {
+  ws.close()
+  throw new Error('The slot has no open page yet. Have your service open one, then retry.')
+}
+;({ sessionId } = await send('Target.attachToTarget', { targetId: page.targetId, flatten: true }))
+await send('Page.enable', {}, sessionId)
+await send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800 }, sessionId)
+
+// Input from the person, as mouse and key events.
+export const click = async (x, y) => {
+  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 }, sessionId)
+  }
+}
+
+export const type = async (text) => {
+  for (const key of text) {
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key, text: key }, sessionId)
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key }, sessionId)
+  }
+}
+
+export const paste = (text) => send('Input.insertText', { text }, sessionId)
+```
+
+`Target.getTargets` on a slot lists only that slot's pages. Other slots on the same Chromium are not visible, even by guessing ids.
+
+## The person's side
+
+Your server forwards each frame to the person's browser over your own WebSocket or Server-Sent Events, and accepts clicks and keys coming back.
+
+<Steps>
+
+1. **Draw the frames.** Put each JPEG into an `<img>` or paint it on a `<canvas>`. Frames arrive only when the page repaints, so a still page sends almost nothing.
+
+2. **Map click coordinates.** The frame's `metadata` carries `deviceWidth` and `deviceHeight`, the page's size in CSS pixels. If the image is drawn at a different size, scale the click: `x = (clientX / imageWidth) * deviceWidth`.
+
+3. **Translate input, never relay it.** Your server turns the person's events into `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` and `Input.insertText`. It does not forward arbitrary DevTools commands from the person.
+
+4. **Handle special keys.** For keys like Enter, Backspace and the arrows, send `code` and `windowsVirtualKeyCode` along with `key`. Printable characters only need `key` and `text`. For pasted text use `Input.insertText`.
+
+5. **Stop the screencast.** When the person leaves, send `Page.stopScreencast` and close the connection.
+
+</Steps>
+
+<Aside type="tip" title="Why translating matters">
+  A slot token is control of a browser on the node's machine. A person steering a slot through a viewer you build is
+  fine, because the viewer sends only mouse and key events. Handing that person the token would be a different thing.
+  See [Trust and isolation](/docs/security/trust/).
+</Aside>
+
+## Handing back
+
+After the person is done, your service connects again with Playwright or Puppeteer. The pages, cookies and form state are what they left. Save the slot (`JSON.stringify(slot)`) before the handoff if the service that takes it back is a different process. See [Hand off and clean up](/docs/guides/hand-off/).
+
+## What watching costs
+
+Frames cost bandwidth through the node and the relay: about the frame size times the frame rate. Measured on loopback against a page that repaints every frame, which is the worst case, one watcher was about 60 frames per second at about 36 KB each, roughly 2 MB/s. A static page sends frames only when it repaints and costs far less.
+
+Budget the relay's network for that figure per concurrent watcher, and measure on your real network. `pnpm test:browser` in the repository prints the numbers. Lowering `quality`, `maxWidth` and `maxHeight` on `Page.startScreencast` cuts the cost, and `everyNthFrame` skips frames.
+
+A viewer that cannot keep up is closed by the node, so one slow watcher cannot grow its memory.

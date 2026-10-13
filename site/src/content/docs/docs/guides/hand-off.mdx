@@ -1,0 +1,61 @@
+---
+title: Hand off and clean up
+description: Save a slot, come back to it later, and release browsers that a crash orphaned.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+## Come back to a browser
+
+A slot is more than one script run. You can save it, step away, and reconnect to the same pages. This is how a service hands a browser to a person (see [Live view](/docs/guides/live-view/)) and takes it back.
+
+```js
+// Save what you need to come back.
+const saved = JSON.stringify(slot) // { slotId, token, url, nodeId }
+
+// Later, possibly in another process.
+const slot = box.slot(JSON.parse(saved)) // makes no request
+if (await slot.isAlive()) {
+  const browser = await chromium.connectOverCDP(slot.cdpUrl, { headers: slot.headers })
+  // the same pages are still there
+}
+```
+
+`isAlive()` never throws. A box that cannot be asked counts as "not alive".
+
+<Aside type="caution">The saved slot contains the slot token. Store it like a secret.</Aside>
+
+### The saved slot names its box
+
+A stored slot says which box it lives on. The client only sends its API key and the slot token to **its own** box, and refuses a saved slot that names another one. That way a tampered row cannot redirect your credentials somewhere else.
+
+If your box moved while slots were still live, list the old addresses:
+
+```js
+const box = createBrowserBay({
+  url: 'https://browsers.example.com',
+  apiKey,
+  allowOtherBoxes: ['https://old-box.example.com']
+})
+```
+
+Only those boxes are trusted too. Addresses are compared however they are spelled, so `https://Old-Box.example.com:443/` is the same box. `allowOtherBoxes: true` trusts any address, which is only for storage nobody else can write.
+
+### After a relay restart
+
+Nodes reconnect on their own and list the contexts they still hold, so existing tokens keep working. It takes up to about 15 seconds. Until they reconnect, the relay does not know their slots, so `isAlive()` can say `false` for a slot that is about to come back. Give it that long before deciding a browser is gone.
+
+## Clean up orphans
+
+A client that dies mid-use leaves a browser behind. Two things catch it. The lease closes every browser at its `maxLifetimeSeconds`. For something sooner, `reap` asks you which runs are still live and releases the rest:
+
+```js
+const released = await box.reap({
+  isLive: async (runId) => await jobs.isRunning(runId),
+  graceMs: 3 * 60 * 1000 // a slot younger than this is never reaped (the default)
+})
+```
+
+Run it on a schedule. `skip(runId)` leaves alone run ids that nothing can vouch for.
+
+To release a slot you no longer hold the token for, such as one found with `list()`, use `box.release(slotId)`. It needs only the API key.

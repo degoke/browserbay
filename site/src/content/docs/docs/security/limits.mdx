@@ -1,0 +1,12 @@
+---
+title: Limits
+description: What this version of browserbay does not do yet.
+---
+
+- **One relay instance.** The registry is in memory and recovered from the nodes. Sharding it is a later step.
+- **Use the slot's own context.** `browser.contexts()[0]`. On a node with the default isolation a client may not create its own browser contexts (`browser.newContext()` is refused), because the slot _is_ the context. With `BROWSERBAY_ISOLATION=process` it may, and they are the slot's.
+- **Pages open only on `http(s)`, `data:`, `blob:` and `about:blank`.** Downloads are denied. On a node with the default isolation the `IO` and `Tracing` DevTools domains are denied too (so `page.pdf()` and tracing do not work), as are `Storage`, `Memory` and `SystemInfo`. With `BROWSERBAY_ISOLATION=process` they are open.
+- **Uploads are sent as data.** Playwright's `setInputFiles({ name, mimeType, buffer })` does this for a remote client. A file path on the node is refused.
+- **Tested with Playwright 1.62.** Other versions that speak a compatible DevTools protocol should work, but the Chromium in the image is the one that version ships.
+- **No viewer is included.** [Live view](/docs/guides/live-view/) gives you the stream and the input path. The interface a person looks at is yours to build.
+- **Nothing runs on top of the browser.** There is no agent loop, no model call, no crawler and no screenshot endpoint. That is on purpose: what drives the browser is up to you.

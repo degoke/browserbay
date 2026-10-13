@@ -1,0 +1,109 @@
+---
+title: Python client
+description: The Python client, browserbay, with sync and async APIs.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+A Python client with the same behaviour as the [Node client](/docs/reference/client/). It uses only the standard library, so installing it adds no dependencies. Python 3.9 or newer.
+
+```sh
+pip install "git+https://github.com/degoke/browserbay.git#subdirectory=clients/python"
+```
+
+<Aside>
+  The package is named `browserbay`. It is not necessarily published to PyPI yet, so install it from the repository as
+  above.
+</Aside>
+
+## Quick start
+
+<Tabs>
+  <TabItem label="Sync">
+    ```python
+    import os
+    from browserbay import BrowserBay
+    from playwright.sync_api import sync_playwright
+
+    box = BrowserBay("https://browsers.example.com", os.environ["BROWSERBAY_API_KEY"])
+
+    with sync_playwright() as p, box.acquire(run_id="task-42", max_lifetime_seconds=1800) as slot:
+        browser = p.chromium.connect_over_cdp(slot.cdp_url, headers=slot.headers)
+        page = browser.contexts[0].new_page()  # the slot's own context
+        page.goto("https://example.com")
+        print(page.title())
+    # leaving the with block releases the browser
+    ```
+
+  </TabItem>
+  <TabItem label="Async">
+    ```python
+    import asyncio
+    import os
+    from browserbay import AsyncBrowserBay
+    from playwright.async_api import async_playwright
+
+    box = AsyncBrowserBay("https://browsers.example.com", os.environ["BROWSERBAY_API_KEY"])
+
+    async def main() -> None:
+        async with async_playwright() as p, await box.acquire(run_id="task-42", max_lifetime_seconds=1800) as slot:
+            browser = await p.chromium.connect_over_cdp(slot.cdp_url, headers=slot.headers)
+            page = await browser.contexts[0].new_page()
+            await page.goto("https://example.com")
+            print(await page.title())
+
+    asyncio.run(main())
+    ```
+
+  </TabItem>
+</Tabs>
+
+Playwright is not a dependency of this package: install it yourself.
+
+## The client
+
+```python
+box = BrowserBay(url, api_key, namespace=None, allow_other_boxes=None, logger=None,
+                 timeout=15.0, lookup_timeout=3.0, release_timeout=10.0, retry_delay=0.3)
+
+box.acquire(run_id, max_lifetime_seconds, wait_ms=30000)  # -> Slot
+box.slot(stored)                     # a Slot from what you saved earlier; makes no request
+box.release(slot_id, url=None)       # releases a slot you only know the id of
+box.list()                           # -> [SlotSummary]
+box.nodes()                          # -> [NodeSummary]
+box.reap(is_live, grace_ms=180000, skip=None)  # releases slots whose owner is gone; returns how many
+
+slot.cdp_url  slot.headers  slot.slot_id  slot.node_id  slot.token
+slot.is_alive()   # never raises; a box that cannot be asked counts as "not alive"
+slot.release()    # idempotent
+slot.to_dict()    # what to save to come back to this browser later
+```
+
+`AsyncBrowserBay` and `AsyncSlot` have the same methods, awaited. They run the blocking client in worker threads, with no extra dependencies. `box.slot(stored)` makes no request, so it is not a coroutine, and `reap` accepts plain or `async def` callbacks.
+
+## Errors
+
+Every failure of the box or the network is a `BrowserBayError`. Its `status` is the HTTP status, or `None` when the box could not be reached. A full box is a `NoCapacityError`, a subclass with status 503.
+
+A key whose quota is used up is a `QuotaExceededError` (status 429, answered at once), and a key confined to another namespace is a `ForbiddenError` (403): make the client with the matching `namespace`. Both are subclasses too.
+
+```python
+from browserbay import BrowserBayError, NoCapacityError
+
+try:
+    slot = box.acquire(run_id="task-42", max_lifetime_seconds=1800, wait_ms=5000)
+except NoCapacityError:
+    ...  # every browser is busy: retry later, or queue the work
+except BrowserBayError as error:
+    print(error.status, error)  # e.g. 401 for a wrong API key
+```
+
+Bad arguments are caught before anything is sent: `ValueError` for a value the box would refuse and `TypeError` for the wrong type. Error messages never contain the API key or a slot token, and `repr(slot)` leaves the token out.
+
+## Things to know
+
+- **Context managers.** Leaving a `with` block releases the browser even when the block raised. A failing release does not replace the original error.
+- **Redirects are never followed**, so the API key cannot be sent to another host by a redirect.
+- **A saved slot** (`slot.to_dict()`) uses the same keys as the Node and Go clients, so any of the three can revive the others' slots. It holds the slot token, so store it like a secret. See [Hand off and clean up](/docs/guides/hand-off/).
+
+The full reference is in the package's [README](https://github.com/degoke/browserbay/tree/main/clients/python).

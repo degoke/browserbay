@@ -1,0 +1,68 @@
+---
+title: HTTP API
+description: The small HTTP and WebSocket API the client wraps, for any language.
+---
+
+The Node client is a thin wrapper over this API. Types are in [`src/protocol.ts`](https://github.com/degoke/browserbay/blob/main/src/protocol.ts).
+
+Two kinds of credential are used. The **API key** goes in `Authorization: Bearer <key>`. A **slot token** goes in `x-browserbay-token: <token>`.
+
+| Call                   | Auth       | Does                                                                                                                                                                                  |
+| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/slots`       | API key    | Takes a browser.                                                                                                                                                                      |
+| `GET /v1/slots`        | API key    | Lists slots. No tokens. A key confined to a namespace sees only its own.                                                                                                              |
+| `DELETE /v1/slots/:id` | API key    | Releases a browser. Idempotent, `204`. A key confined to a namespace cannot release another namespace's slot: that answers `204` and does nothing, as for a slot that does not exist. |
+| `GET /v1/nodes`        | API key    | Lists nodes, their capacity and load. `403` for a key confined to a namespace.                                                                                                        |
+| `GET /v1/slots/:id`    | slot token | `200` while the slot's browser is reachable, `404` when gone, `503` while its node reconnects.                                                                                        |
+| `WS /v1/cdp/:id`       | slot token | The slot's DevTools endpoint.                                                                                                                                                         |
+| `GET /health`          | none       | `200` when the relay is up. It does not say a node has joined.                                                                                                                        |
+
+## Take a browser
+
+```sh
+curl -X POST https://browsers.example.com/v1/slots \
+  -H "Authorization: Bearer $BROWSERBAY_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "runId": "task-42", "maxLifetimeSeconds": 1800, "waitMs": 5000 }'
+```
+
+| Status | Body                              | Meaning                                                                                                     |
+| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `201`  | `{ "slotId", "token", "nodeId" }` | You have a browser. The token is shown once.                                                                |
+| `503`  | `no_capacity`                     | Every node is full, or none is connected.                                                                   |
+| `403`  | `forbidden`                       | The key is confined to a namespace and the run id is outside it.                                            |
+| `429`  | `quota_exceeded`                  | The key's namespace already holds as many browsers as its quota allows. Answered at once: it does not wait. |
+| `400`  |                                   | A bad body: `runId` is 1 to 200 characters, `maxLifetimeSeconds` is 60 to 86400.                            |
+
+`waitMs` defaults to 0 here, while the client's default is 30 seconds. The box caps it at its `BROWSERBAY_MAX_ACQUIRE_WAIT_MS`.
+
+## Connect to the browser
+
+Open a WebSocket to `/v1/cdp/<slotId>` on the box, with the `x-browserbay-token` header. Use `wss://` when the box is served over HTTPS. Speak the Chrome DevTools Protocol.
+
+```js
+// Node, with the ws package
+import WebSocket from 'ws'
+const ws = new WebSocket(`wss://browsers.example.com/v1/cdp/${slotId}`, {
+  headers: { 'x-browserbay-token': token }
+})
+```
+
+The [live view guide](/docs/guides/live-view/) builds on this.
+
+## Release a browser
+
+```sh
+curl -X DELETE https://browsers.example.com/v1/slots/$SLOT_ID \
+  -H "Authorization: Bearer $BROWSERBAY_API_KEY"
+```
+
+Answers `204`, whether or not the slot still exists.
+
+## Check a browser is still there
+
+```sh
+curl https://browsers.example.com/v1/slots/$SLOT_ID -H "x-browserbay-token: $TOKEN"
+```
+
+`200` while the browser is reachable, `404` when it is gone, and `503` while its node reconnects.

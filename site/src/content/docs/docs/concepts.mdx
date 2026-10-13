@@ -1,0 +1,40 @@
+---
+title: Concepts
+description: Box, relay, node, slot, lease and the three secrets.
+---
+
+## The pieces
+
+**Relay.** The one process your services talk to. It checks API keys, decides which node has room, and passes DevTools traffic through. It keeps its state in memory and recovers it from the nodes, so there is no database. Run exactly one.
+
+**Node.** A machine running Chromium. A node dials **out** to the relay, so it needs no inbound port and can sit behind NAT, on a laptop, or on a Raspberry Pi. Each node has a number of slots it can serve at once.
+
+**Box.** A relay plus its nodes. `browserbay start` runs a relay and one node in a single process, which is the simplest box.
+
+**Slot.** One browser on loan: a Chromium BrowserContext with its own cookies, storage and cache, on whichever node had room. You get a DevTools address (`slot.cdpUrl`) and a token. The slot is the context, so you use `browser.contexts()[0]` and do not create another.
+
+## The lifecycle of a browser
+
+1. **Acquire.** You ask for a slot with a `runId` and a `maxLifetimeSeconds`. If every node is full, the box holds your request for up to `waitMs`, then answers that it has no capacity.
+2. **Drive.** You connect Playwright, Puppeteer or any DevTools client to the slot. A second connection can watch and steer through [live view](/docs/guides/live-view/).
+3. **Release.** You hand it back. Releasing is idempotent, so calling it twice is fine.
+
+If you never release, the **lease** ends it. Every browser closes itself at `maxLifetimeSeconds`, even while the relay is unreachable. That is what stops a crashed client from holding a browser forever.
+
+## runId
+
+`runId` is your own id for what the browser is for: a run, a task, a job. The box hands it back when you list slots, so you can ask "is this still needed?" and release browsers that a crash orphaned. See [Hand off and clean up](/docs/guides/hand-off/).
+
+## Three secrets, three jobs
+
+| Secret                | Held by               | What it does                                                                                                                     |
+| --------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **API key**           | Your services         | Creates, lists and releases browsers. Never sent to a browser. One unrestricted key, or one per service confined to a namespace. |
+| **Slot token**        | Whoever drives a slot | Reaches that one slot's browser and nothing else.                                                                                |
+| **Enrollment secret** | A node                | Lets the node join the relay. The relay stores only its hash.                                                                    |
+
+Keeping them separate means a leaked slot token does not let anyone create browsers, and a node does not hold the key that your services use.
+
+## Namespace
+
+When several projects share a box, give each a `namespace`. Slots are created as `<namespace>:<runId>`, and `list()` and `reap()` only see that project's. It is a naming convention, not access control. See [Share one box](/docs/guides/share-a-box/).

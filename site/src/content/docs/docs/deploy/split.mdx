@@ -1,0 +1,75 @@
+---
+title: Relay and nodes
+description: Run one relay and any number of nodes, on any machines.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components'
+
+When you want browsers on several machines, run **one relay** and any number of nodes. Nodes dial out to the relay, so they need no inbound port.
+
+```
+your services ──▶ relay (HTTPS, one replica) ◀── node (VPS)
+                                              ◀── node (Raspberry Pi)
+                                              ◀── node (laptop behind NAT)
+```
+
+<Steps>
+
+1. **Make the secrets.** One enrollment secret per node (or per group of nodes), and an API key.
+
+   ```sh
+   docker run --rm ghcr.io/degoke/browserbay secret laptop
+   openssl rand -base64 24    # the API key
+   ```
+
+   The `secret` command prints two lines: the secret for the node, and the `name:sha256` entry for the relay. The node gets the secret. The relay gets only its hash.
+
+   From a checkout, `node dist/cli.js secret laptop` and `node dist/cli.js key` do the same after `pnpm build`.
+
+2. **Run the relay.** It uses the `relay` image, which has no Chromium and is about 230 MB. Run exactly **one replica**, because the nodes' sockets live in that process.
+
+   ```sh
+   docker run -d --restart always -p 8788:8788 \
+     -e BROWSERBAY_API_KEY=... -e BROWSERBAY_ENROLLMENT_SECRETS=laptop:<sha256> \
+     ghcr.io/degoke/browserbay-relay
+   ```
+
+   Serve it over HTTPS with WebSocket support, at the root of its own hostname or behind a proxy that strips a path prefix.
+
+3. **Run nodes** anywhere, from the `browserbay` image with the command `node`.
+
+   ```sh
+   docker run -d --restart always --init --stop-timeout 130 \
+     -e BROWSERBAY_RELAY_URL=https://browsers.example.com -e BROWSERBAY_ENROLLMENT_SECRET=... \
+     ghcr.io/degoke/browserbay node
+   ```
+
+   A node refuses a plain `http://` relay unless the relay is on the same machine, because its enrollment secret travels to it. On a private network you trust you can opt in with `BROWSERBAY_ALLOW_INSECURE_RELAY=true`. It covers only private addresses: a relay on a public address must use `https://`.
+
+   A node that cannot join says why in its log, whether an unreachable address, a wrong secret, an invalid id or slot count, or a duplicate id, and keeps trying.
+
+4. **Check it.**
+
+   ```sh
+   curl https://browsers.example.com/health
+   curl -H "Authorization: Bearer $BROWSERBAY_API_KEY" https://browsers.example.com/v1/nodes
+   ```
+
+   `/health` does not say a node has joined. Look at `/v1/nodes` for that.
+
+</Steps>
+
+<Aside type="tip" title="Why split">
+  With a split deployment, the machines that run browsers hold only a node's enrollment secret. The API key stays on the
+  relay's machine. That is the better arrangement for anything sensitive.
+</Aside>
+
+## Rotating an enrollment secret
+
+1. Add the new `name:sha256` to `BROWSERBAY_ENROLLMENT_SECRETS`.
+2. Move the nodes to the new secret and restart them.
+3. Remove the old entry.
+
+## Upgrading
+
+The node and the relay each announce a protocol version. The relay closes a node that speaks another one (code `4426`) and the node logs a warning. Upgrade the relay and the nodes together.

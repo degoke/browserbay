@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>browserbay</title>
+  <style>
+    .s { stroke: #1B1F3B; }
+    .f { fill: #2F6BFF; }
+    @media (prefers-color-scheme: dark) { .s { stroke: #E9ECFA; } .f { fill: #5B8CFF; } }
+  </style>
+  <rect class="s" x="8.5" y="8.5" width="19" height="19" rx="5" stroke-width="5"/>
+  <rect class="s" x="36.5" y="8.5" width="19" height="19" rx="5" stroke-width="5"/>
+  <rect class="s" x="8.5" y="36.5" width="19" height="19" rx="5" stroke-width="5"/>
+  <rect class="f" x="34" y="34" width="24" height="24" rx="7"/>
+</svg>

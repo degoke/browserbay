@@ -1,0 +1,47 @@
+---
+title: What is browserbay
+description: Browsers for AI agents and automation, as a service you deploy once and point any project at.
+---
+
+import { LinkCard, CardGrid } from '@astrojs/starlight/components'
+
+browserbay is a box that lends out browsers. You ask it for one and get back a DevTools address and a token. What drives the browser is up to you: Playwright, Puppeteer, an AI agent loop, a screenshot service. The box does not know or care what is on the other end, which is what makes it reusable across projects.
+
+```
+your service A ─┐                          ┌─ node (anywhere): Chromium, one isolated context per slot
+your service B ─┼──▶ relay (one instance) ◀┤
+your service C ─┘    auth + scheduling     └─ node (another machine, behind NAT, a laptop…)
+```
+
+## What you get
+
+- **Isolated browsers.** Every browser is its own BrowserContext (own cookies, storage, cache) on a shared Chromium. A client sees its own pages and nothing else on that Chromium. This is tested against real Chromium, including attempts to reach another slot.
+- **Deploys anywhere.** `docker run` it on a VPS, a container platform, a Raspberry Pi. Nodes only ever connect **out** to the relay, so a node can sit behind NAT, and no DevTools port is open anywhere.
+- **Scales by adding nodes.** Start with one container. Add capacity by running more nodes, wherever you like.
+- **Hard to leak.** Three separate secrets, a leased lifetime on every browser so a crashed client does not hold one forever, and a protocol version check between relay and nodes.
+- **Clients for Node, Python and Go.** Anything else can use the small [HTTP API](/docs/reference/http-api/).
+- **Runs on Kubernetes.** A [Helm chart](/docs/deploy/kubernetes/) runs one relay and nodes that scale on their own.
+- **Live view.** A person can watch a browser and click and type in it while your service is away, then your service picks up where they left off. See [Live view](/docs/guides/live-view/).
+
+## A box, not a framework
+
+browserbay gives you the browser and nothing on top of it. There is no agent loop, no model call, no crawler and no screenshot API. If you want those, build them on the DevTools address the box hands you.
+
+<CardGrid>
+  <LinkCard
+    title="Quick start"
+    description="A running box and a first script in a few minutes."
+    href="/docs/quick-start/"
+  />
+  <LinkCard
+    title="Concepts"
+    description="Box, relay, node, slot, lease. The words the rest of the docs use."
+    href="/docs/concepts/"
+  />
+  <LinkCard title="Live view" description="Let a person watch and steer a browser." href="/docs/guides/live-view/" />
+  <LinkCard
+    title="Trust and isolation"
+    description="What a slot token is, and what it is not. Read before sharing tokens."
+    href="/docs/security/trust/"
+  />
+</CardGrid>
