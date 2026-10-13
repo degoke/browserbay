@@ -36,13 +36,30 @@ export interface EnrollmentSecret {
   sha256: string
 }
 
+export interface ApiKeyEntry {
+  /** A name for the key, for logs. */
+  id: string
+  /** sha256 hex of the key. The relay never holds the key itself. */
+  sha256: string
+  /**
+   * Confines the key to one namespace: it may only create slots whose run id starts with `<namespace>:`, and it only
+   * sees and releases such slots. A key without one reaches every slot and the node list.
+   */
+  namespace?: string
+  /** The most slots the namespace may hold at once (needs a namespace). */
+  maxSlots?: number
+}
+
 export interface RelayLogger {
   info?(message: string, fields?: Record<string, unknown>): void
   warn?(message: string, fields?: Record<string, unknown>): void
 }
 
 export interface RelayOptions {
-  apiKey: string
+  /** An unrestricted key, as the secret itself. Shorthand for an `apiKeys` entry named `default` with no namespace. */
+  apiKey?: string
+  /** Keys by hash, each optionally confined to a namespace with a quota. At least one of `apiKey` and `apiKeys` is needed. */
+  apiKeys?: ApiKeyEntry[]
   enrollmentSecrets: EnrollmentSecret[]
   heartbeatMs?: number
   nodeTimeoutMs?: number
@@ -155,10 +172,26 @@ export function createRelayServer(options: RelayOptions) {
   const streamWss = new WebSocketServer({ ...wssOptions, maxPayload: maxMessageBytes })
   const clientWss = new WebSocketServer({ ...wssOptions, maxPayload: maxMessageBytes })
 
-  const apiAuthorized = (req: IncomingMessage) => {
+  const apiKeys: ApiKeyEntry[] = [
+    ...(options.apiKey ? [{ id: 'default', sha256: hashToken(options.apiKey) }] : []),
+    ...(options.apiKeys ?? [])
+  ]
+  if (apiKeys.length === 0) throw new TypeError('The relay needs an apiKey or at least one entry in apiKeys')
+
+  /** The key a request presents, or undefined. */
+  const authenticateKey = (req: IncomingMessage) => {
     const header = req.headers.authorization
-    return typeof header === 'string' && header.startsWith('Bearer ') && safeEqual(header.slice(7), options.apiKey)
+    if (typeof header !== 'string' || !header.startsWith('Bearer ')) return undefined
+    const presented = hashToken(header.slice(7))
+    let matched: ApiKeyEntry | undefined
+    // No early exit: how long this takes must not depend on which key matched.
+    for (const entry of apiKeys) if (safeEqual(presented, entry.sha256.toLowerCase())) matched = entry
+    return matched
   }
+  /** A namespaced key owns the run ids that start with `<namespace>:`; a name has no ':', so `a` never owns `a:b:`'s. */
+  const inNamespace = (key: ApiKeyEntry, runId: string) => !key.namespace || runId.startsWith(`${key.namespace}:`)
+  /** Creates a key's namespace has been asked for and not yet answered: they count against its quota already. */
+  const inFlight = new Map<string, number>()
   const runToken = (req: IncomingMessage) => {
     const value = req.headers[TOKEN_HEADER]
     return typeof value === 'string' ? value : undefined
@@ -183,17 +216,23 @@ export function createRelayServer(options: RelayOptions) {
         return json(res, 200, summary)
       }
 
-      if (!apiAuthorized(req)) return fail(res, 401, 'unauthorized')
+      const key = authenticateKey(req)
+      if (!key) return fail(res, 401, 'unauthorized')
 
-      if (path === RELAY_PATHS.slots && method === 'POST') return await createSlot(req, res)
+      if (path === RELAY_PATHS.slots && method === 'POST') return await createSlot(req, res, key)
       if (path === RELAY_PATHS.slots && method === 'GET') {
-        return json(res, 200, { slots: registry.listSlots() } satisfies ListSlotsResponse)
+        const slots = registry.listSlots((runId) => inNamespace(key, runId))
+        return json(res, 200, { slots } satisfies ListSlotsResponse)
       }
       if (path === RELAY_PATHS.nodes && method === 'GET') {
+        // Which machines exist and how loaded they are is the operator's business, not a tenant's.
+        if (key.namespace) return fail(res, 403, 'forbidden')
         return json(res, 200, { nodes: registry.listNodes() } satisfies ListNodesResponse)
       }
       if (slotMatch && method === 'DELETE') {
-        registry.release(slotMatch[1]!)
+        // Another namespace's slot is left alone and answered like one that does not exist, so a key cannot probe for ids.
+        const slot = registry.getSlot(slotMatch[1]!)
+        if (!slot || inNamespace(key, slot.runId)) registry.release(slotMatch[1]!)
         res.writeHead(204)
         return void res.end()
       }
@@ -204,7 +243,7 @@ export function createRelayServer(options: RelayOptions) {
     }
   }
 
-  async function createSlot(req: IncomingMessage, res: ServerResponse) {
+  async function createSlot(req: IncomingMessage, res: ServerResponse, key: ApiKeyEntry) {
     let body: Partial<CreateSlotRequest> | null
     try {
       body = (await readJson(req)) as Partial<CreateSlotRequest> | null
@@ -221,6 +260,15 @@ export function createRelayServer(options: RelayOptions) {
       maxLifetimeSeconds! <= SLOT_LIMITS.maxLifetimeSeconds &&
       (waitMs === undefined || (Number.isInteger(waitMs) && waitMs >= 0))
     if (!valid) return fail(res, 400, 'invalid_request')
+    if (!inNamespace(key, runId)) return fail(res, 403, 'forbidden')
+
+    // The count and the claim are one synchronous step, so concurrent requests cannot both squeeze under the quota.
+    const { namespace, maxSlots } = key
+    if (namespace && maxSlots !== undefined) {
+      const held = registry.countSlots((runId) => inNamespace(key, runId))
+      if (held + (inFlight.get(namespace) ?? 0) >= maxSlots) return fail(res, 429, 'quota_exceeded')
+    }
+    if (namespace) inFlight.set(namespace, (inFlight.get(namespace) ?? 0) + 1)
     // A caller that hangs up while waiting for capacity must not be given a slot nobody will ever release.
     const abandoned = new AbortController()
     res.once('close', () => {
@@ -233,12 +281,18 @@ export function createRelayServer(options: RelayOptions) {
         waitMs: Math.min(waitMs ?? 0, maxAcquireWaitMs),
         signal: abandoned.signal
       })
-      logger.info?.('Slot created', { slotId: slot.slotId, runId, nodeId: slot.nodeId })
+      logger.info?.('Slot created', { slotId: slot.slotId, runId, nodeId: slot.nodeId, key: key.id })
       return json(res, 201, slot satisfies CreateSlotResponse)
     } catch (error) {
       if (error instanceof AllocationAbortedError) return
       if (error instanceof NoCapacityError) return fail(res, 503, 'no_capacity')
       throw error
+    } finally {
+      if (namespace) {
+        const left = (inFlight.get(namespace) ?? 1) - 1
+        if (left > 0) inFlight.set(namespace, left)
+        else inFlight.delete(namespace)
+      }
     }
   }
 
@@ -337,6 +391,12 @@ export function createRelayServer(options: RelayOptions) {
           return registry.answerCreate(nodeId, String(message.reqId))
         case 'context.failed':
           return registry.answerCreate(nodeId, String(message.reqId), String(message.message ?? 'failed'))
+        case 'context.ended':
+          return void registry.endFromNode(
+            nodeId,
+            String(message.slotId),
+            String(message.reason ?? 'ended').slice(0, 200)
+          )
         case 'stream.failed': {
           const pending = pendingStreams.get(String(message.streamId))
           if (!pending) return

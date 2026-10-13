@@ -9,7 +9,7 @@ import { createRelayServer } from './server.js'
 export async function runRelay(env: NodeJS.ProcessEnv = process.env) {
   const config = parseRelayConfig(env)
   const relay = createRelayServer({
-    apiKey: config.apiKey,
+    apiKeys: config.apiKeys,
     enrollmentSecrets: config.enrollmentSecrets,
     maxAcquireWaitMs: config.maxAcquireWaitMs,
     logger: { info: log('info'), warn: log('warn') }

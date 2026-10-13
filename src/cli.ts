@@ -2,7 +2,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { errorMessage } from './errors.js'
-import { ConfigError, NAME_PATTERN } from './protocol.js'
+import { ConfigError, NAME_PATTERN, quotaProblem } from './protocol.js'
 
 const HELP = `browserbay: self-hosted browsers for AI agents and automation
 
@@ -10,7 +10,7 @@ const HELP = `browserbay: self-hosted browsers for AI agents and automation
   browserbay relay     the relay alone (clients and remote nodes connect to it)
   browserbay node      a browser node alone (dials out to a relay)
   browserbay secret    make an enrollment secret for a node, and the entry the relay needs for it
-  browserbay key       make an API key
+  browserbay key       make an API key (with a name, also the entry the relay needs: see BROWSERBAY_API_KEYS)
 
 Settings are environment variables; see the README.`
 
@@ -34,6 +34,41 @@ try {
   // A bad setting should read as a sentence, not a stack trace; and as status 2.
   console.error(errorMessage(error))
   process.exit(error instanceof ConfigError ? 2 : 1)
+}
+
+/**
+ * `browserbay key` prints a bare key, for BROWSERBAY_API_KEY. With a name it also prints the BROWSERBAY_API_KEYS entry
+ * for the relay (which only ever holds the hash), optionally confined to a namespace with a quota of slots:
+ * `browserbay key billing --namespace billing --quota 5`.
+ */
+function makeKey(args: string[]) {
+  const [name, ...flags] = args
+  if (name === undefined) return console.log(secret())
+  const options: Record<string, string> = {}
+  for (let i = 0; i < flags.length; i += 2) {
+    const flag = flags[i]
+    const value = flags[i + 1]
+    if ((flag !== '--namespace' && flag !== '--quota') || value === undefined || value.startsWith('--')) {
+      console.error('Usage: browserbay key [name [--namespace <namespace>] [--quota <slots>]]')
+      process.exit(2)
+    }
+    options[flag.slice(2)] = value
+  }
+  if (!NAME_PATTERN.test(name) || (options.namespace !== undefined && !NAME_PATTERN.test(options.namespace))) {
+    console.error('A name and a namespace may only contain letters, digits, "_", "." and "-".')
+    process.exit(2)
+  }
+  const quotaIssue = options.quota === undefined ? undefined : quotaProblem(options.quota, options.namespace)
+  if (quotaIssue) {
+    console.error(`--quota: ${quotaIssue}.`)
+    process.exit(2)
+  }
+  const value = secret()
+  const hash = createHash('sha256').update(value).digest('hex')
+  const entry = [name, hash, options.namespace ?? '', options.quota ?? ''].join(':').replace(/:+$/, '')
+  console.log(`Give the service:  BROWSERBAY_API_KEY=${value}   (as the client's apiKey)`)
+  console.log(`Give the relay:    BROWSERBAY_API_KEYS=${entry}   (comma-separate several)`)
+  if (options.namespace) console.log(`The service must create its browsers with namespace "${options.namespace}".`)
 }
 
 // Each command loads only what it runs: `key` and `secret` do not need the relay, the browser node or their dependencies.
@@ -63,7 +98,7 @@ async function dispatch() {
       break
     }
     case 'key':
-      console.log(secret())
+      makeKey(args)
       break
     case undefined:
     case 'help':

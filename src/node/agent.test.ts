@@ -790,3 +790,97 @@ test('a relay that speaks another protocol version is warned about, and so is be
     await relay.close()
   }
 })
+
+test('agent: a slot whose own browser ends is dropped from what the node reports, and its connections are not left open', async () => {
+  const { fake, scope } = await startBrowser()
+  const listeners: Array<(runKey: string, reason: string) => void> = []
+  const disposed: string[] = []
+  const host = {
+    createRun: (runKey: string) => scope.createRun(runKey),
+    disposeRun: async (runKey: string) => {
+      disposed.push(runKey)
+      await scope.disposeRun(runKey)
+    },
+    connect: scope.connect,
+    onRunEnded: (listener: (runKey: string, reason: string) => void) => void listeners.push(listener)
+  }
+  const relay = await startFakeRelay()
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope: host,
+    maxContexts: 2
+  })
+  try {
+    await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+    relay.send({ t: 'welcome', heartbeatMs: 40 })
+    await agent.whenConnected()
+    relay.send(create('s1'))
+    relay.send(create('s2'))
+    await until(() => agent.contextCount() === 2, 'both contexts')
+
+    listeners[0]!('s1', 'its browser ended (SIGSEGV)')
+    await until(() => agent.contextCount() === 1, 's1 to be dropped')
+    assert.deepEqual(agent.contextIds(), ['s2'])
+    assert.deepEqual(disposed, ['s1'])
+    await until(() => relay.of('context.ended').length > 0, 'the relay to be told')
+    assert.deepEqual(
+      relay.of('context.ended').map((frame) => [frame.slotId, frame.reason]),
+      [['s1', 'its browser ended (SIGSEGV)']],
+      'the relay is told at once, not left to notice'
+    )
+    await until(
+      () => relay.of('heartbeat').some((beat) => beat.contexts.length === 1 && beat.contexts[0].slotId === 's2'),
+      'a heartbeat without it'
+    )
+    assert.ok(fake)
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('agent: a context still being closed holds its place, so a replacement cannot start a second browser beside it', async () => {
+  const { scope } = await startBrowser()
+  let finishDispose: () => void = () => undefined
+  const slowDispose = new Promise<void>((resolve) => (finishDispose = resolve))
+  const host = {
+    createRun: (runKey: string) => scope.createRun(runKey),
+    disposeRun: async (runKey: string) => {
+      await slowDispose
+      await scope.disposeRun(runKey)
+    },
+    connect: scope.connect
+  }
+  const relay = await startFakeRelay()
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope: host,
+    maxContexts: 1
+  })
+  try {
+    await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+    relay.send({ t: 'welcome', heartbeatMs: 40 })
+    await agent.whenConnected()
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the first context')
+
+    relay.send({ t: 'context.release', slotId: 's1' })
+    await until(() => agent.contextCount() === 0, 's1 to leave the table')
+    relay.send(create('s2'))
+    await until(() => relay.of('context.failed').length === 1, 'the create to be refused while s1 is still closing')
+    assert.match(relay.of('context.failed')[0].message, /full/)
+
+    finishDispose()
+    await until(() => relay.of('heartbeat').some((beat) => beat.contexts.length === 0), 'the close to finish')
+    relay.send(create('s3'))
+    await until(() => relay.of('context.created').length === 1, 'a create once the old browser is gone')
+  } finally {
+    finishDispose()
+    await agent.close()
+    await relay.close()
+  }
+})

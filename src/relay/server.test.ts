@@ -5,7 +5,7 @@ import { WebSocket } from 'ws'
 import { hashToken } from './registry.js'
 import { CLOSE, RELAY_PATHS, TOKEN_HEADER, type NodeContextReport, type RelayToNode } from '../protocol.js'
 import { createRelayServer, type RelayOptions } from './server.js'
-import { parseBoxConfig, parseEnrollmentSecrets, parseRelayConfig } from './config.js'
+import { parseApiKeys, parseBoxConfig, parseEnrollmentSecrets, parseRelayConfig } from './config.js'
 
 const API_KEY = 'relay-api-key-0123456789'
 const SECRET = 'node-enrollment-secret-01'
@@ -699,4 +699,201 @@ test('box settings: remote nodes are optional, the API key is not, and the relay
   )
   // A stand-alone relay, unlike a box, still needs at least one node allowed to join.
   assert.throws(() => parseEnrollmentSecrets(''), /at least one/)
+})
+
+const TENANT_A = 'tenant-a-key-0123456789'
+const TENANT_B = 'tenant-b-key-0123456789'
+const apiKeys = [
+  { id: 'a', sha256: hashToken(TENANT_A), namespace: 'a', maxSlots: 2 },
+  { id: 'b', sha256: hashToken(TENANT_B), namespace: 'b' }
+]
+const as = (key: string, base: string, path: string, init: RequestInit = {}) =>
+  fetch(`${base}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...init.headers }
+  })
+const acquireAs = (key: string, base: string, runId: string) =>
+  as(key, base, RELAY_PATHS.slots, { method: 'POST', body: JSON.stringify({ runId, maxLifetimeSeconds: 600 }) })
+
+test('API keys: name:sha256[:namespace[:quota]] entries, each name, hash and namespace used once', () => {
+  const [h1, h2] = [hashToken('one'), hashToken('two')]
+  assert.deepEqual(parseApiKeys(`ci:${h1}, billing:${h2.toUpperCase()}:billing:5, web:${hashToken('3')}:web`), [
+    { id: 'ci', sha256: h1 },
+    { id: 'billing', sha256: h2, namespace: 'billing', maxSlots: 5 },
+    { id: 'web', sha256: hashToken('3'), namespace: 'web' }
+  ])
+  assert.deepEqual(parseApiKeys(''), [])
+  for (const bad of [
+    'nohash',
+    `ci:short`,
+    `:${h1}`,
+    `bad name:${h1}`,
+    `ci:${h1}:bad ns`,
+    `ci:${h1}::5`,
+    `ci:${h1}:ns:0`,
+    `ci:${h1}:ns:many`,
+    `ci:${h1}:ns:5:extra`,
+    `ci:${h1},ci:${h2}`,
+    `a:${h1},b:${h1}`,
+    `a:${h1}:ns,b:${h2}:ns`
+  ]) {
+    assert.throws(() => parseApiKeys(bad), /BROWSERBAY_API_KEYS/, bad)
+  }
+})
+
+test('API key settings: the plain key and the keyed list combine, and one of them is required', () => {
+  const hash = hashToken('s')
+  const secrets = { BROWSERBAY_ENROLLMENT_SECRETS: `n:${hash}` }
+  const both = parseRelayConfig({
+    ...secrets,
+    BROWSERBAY_API_KEY: API_KEY,
+    BROWSERBAY_API_KEYS: `billing:${hashToken('b')}:billing:2`
+  })
+  assert.deepEqual(both.apiKeys, [
+    { id: 'default', sha256: hashToken(API_KEY) },
+    { id: 'billing', sha256: hashToken('b'), namespace: 'billing', maxSlots: 2 }
+  ])
+  assert.equal(parseRelayConfig({ ...secrets, BROWSERBAY_API_KEYS: `ci:${hashToken('c')}` }).apiKeys.length, 1)
+  assert.equal(parseBoxConfig({ BROWSERBAY_API_KEYS: `ci:${hashToken('c')}` }).apiKeys.length, 1)
+  assert.throws(() => parseRelayConfig(secrets), /Invalid relay configuration: BROWSERBAY_API_KEY/)
+  assert.throws(() => parseBoxConfig({}), /Invalid configuration: BROWSERBAY_API_KEY/)
+  assert.throws(
+    () => parseBoxConfig({ BROWSERBAY_API_KEY: API_KEY, BROWSERBAY_API_KEYS: `default:${hashToken('x')}` }),
+    /same id: default/
+  )
+  assert.throws(() => parseBoxConfig({ BROWSERBAY_API_KEYS: 'not-a-key' }), /name:sha256hex/)
+  // An empty BROWSERBAY_API_KEY (platforms and Compose pass empty variables) is "not set", not a too-short key.
+  const keyed = { BROWSERBAY_API_KEY: '', BROWSERBAY_API_KEYS: `ci:${hashToken('c')}:ci:5` }
+  assert.deepEqual(parseBoxConfig(keyed).apiKeys, [{ id: 'ci', sha256: hashToken('c'), namespace: 'ci', maxSlots: 5 }])
+  assert.deepEqual(parseRelayConfig({ ...keyed, ...secrets }).apiKeys.length, 1)
+  assert.throws(() => parseBoxConfig({ BROWSERBAY_API_KEY: '' }), /BROWSERBAY_API_KEY: Required/)
+  // The quota rule is the one `browserbay key` uses: a whole number, and a namespace to count in.
+  assert.throws(() => parseApiKeys(`ci:${hashToken('c')}:ci:1000000`), /whole number of 1 or more/)
+  assert.throws(() => parseApiKeys(`ci:${hashToken('c')}::5`), /needs a namespace/)
+  assert.throws(() => createRelayServer({ enrollmentSecrets: ENROLLMENTS }), /apiKey/)
+})
+
+test('API keys: a namespaced key only creates, lists and releases its own namespace’s slots', async () => {
+  const { relay, base, wsBase } = await startRelay({ apiKey: API_KEY, apiKeys })
+  const node = await connectNode(wsBase, { maxContexts: 10 })
+  try {
+    await node.welcomed()
+    // Outside its namespace, or without one, is refused: the prefix is the whole of the rule.
+    for (const runId of ['b:job', 'job', 'a', 'a-job', 'A:job', 'a:b:job'.replace('a:', 'x:')]) {
+      assert.equal((await acquireAs(TENANT_A, base, runId)).status, 403, runId)
+    }
+    const mine = (await (await acquireAs(TENANT_A, base, 'a:job')).json()) as { slotId: string; token: string }
+    const theirs = (await (await acquireAs(TENANT_B, base, 'b:job')).json()) as { slotId: string; token: string }
+    const unrestricted = (await (await createSlot(base, { runId: 'plain', maxLifetimeSeconds: 600 })).json()) as {
+      slotId: string
+    }
+    assert.ok(mine.slotId && theirs.slotId && unrestricted.slotId)
+
+    const runIdsFor = async (key: string) =>
+      ((await (await as(key, base, RELAY_PATHS.slots)).json()) as { slots: Array<{ runId: string }> }).slots
+        .map((slot) => slot.runId)
+        .sort()
+    assert.deepEqual(await runIdsFor(TENANT_A), ['a:job'])
+    assert.deepEqual(await runIdsFor(TENANT_B), ['b:job'])
+    assert.deepEqual(await runIdsFor(API_KEY), ['a:job', 'b:job', 'plain'], 'an unrestricted key sees everything')
+
+    // Nodes are the operator's: a tenant is told no, the unrestricted key is not.
+    assert.equal((await as(TENANT_A, base, RELAY_PATHS.nodes)).status, 403)
+    assert.equal((await as(API_KEY, base, RELAY_PATHS.nodes)).status, 200)
+
+    // Releasing another namespace's slot answers like a slot that does not exist, and leaves it alone.
+    for (const id of [theirs.slotId, unrestricted.slotId, 'no-such-slot']) {
+      assert.equal((await as(TENANT_A, base, RELAY_PATHS.slot(id), { method: 'DELETE' })).status, 204)
+    }
+    assert.deepEqual(await runIdsFor(API_KEY), ['a:job', 'b:job', 'plain'])
+    assert.equal((await as(TENANT_A, base, RELAY_PATHS.slot(mine.slotId), { method: 'DELETE' })).status, 204)
+    assert.deepEqual(await runIdsFor(API_KEY), ['b:job', 'plain'])
+
+    // A key cannot be used as a slot token, nor the reverse, and a wrong key is still plainly unauthorized.
+    assert.equal((await as('wrong-key-wrong-key-1', base, RELAY_PATHS.slots)).status, 401)
+    assert.equal((await as(TENANT_A, base, RELAY_PATHS.slot(theirs.slotId))).status, 404)
+  } finally {
+    node.close()
+    await relay.close()
+  }
+})
+
+test('API keys: the quota counts a namespace’s live slots, including ones still being created', async () => {
+  const { relay, base, wsBase } = await startRelay({ apiKeys, maxAcquireWaitMs: 5000 })
+  const node = await connectNode(wsBase, { maxContexts: 10, confirm: false })
+  try {
+    await node.welcomed()
+    // The node has not confirmed anything yet, so both of these are in flight; a third must already be over quota.
+    const first = acquireAs(TENANT_A, base, 'a:1')
+    const second = acquireAs(TENANT_A, base, 'a:2')
+    await until(() => node.held.size === 2, 'both creates to reach the node')
+    assert.equal((await acquireAs(TENANT_A, base, 'a:3')).status, 429)
+    for (const create of node.held.values())
+      node.control.send(JSON.stringify({ t: 'context.created', reqId: create.reqId }))
+    const created = await Promise.all([first, second])
+    assert.deepEqual(
+      created.map((response) => response.status),
+      [201, 201]
+    )
+    assert.equal((await acquireAs(TENANT_A, base, 'a:3')).status, 429, 'two live slots fill a quota of two')
+
+    // Releasing one makes room again.
+    const { slotId } = (await created[0]!.json()) as { slotId: string }
+    assert.equal((await as(TENANT_A, base, RELAY_PATHS.slot(slotId), { method: 'DELETE' })).status, 204)
+    node.held.clear()
+    const again = acquireAs(TENANT_A, base, 'a:3')
+    await until(() => node.held.size === 1, 'the create to reach the node')
+    for (const create of node.held.values())
+      node.control.send(JSON.stringify({ t: 'context.created', reqId: create.reqId }))
+    assert.equal((await again).status, 201)
+  } finally {
+    node.close()
+    await relay.close()
+  }
+})
+
+test('a node can say one of its contexts ended, and only its own: the relay drops the slot at once', async () => {
+  const { relay, base, wsBase } = await startRelay()
+  const one = await connectNode(wsBase, { nodeId: 'n1', maxContexts: 1 })
+  const two = await connectNode(wsBase, { nodeId: 'n2', maxContexts: 1 })
+  try {
+    await Promise.all([one.welcomed(), two.welcomed()])
+    const a = (await (await createSlot(base, { runId: 'a', maxLifetimeSeconds: 600 })).json()) as {
+      slotId: string
+      nodeId: string
+    }
+    const b = (await (await createSlot(base, { runId: 'b', maxLifetimeSeconds: 600 })).json()) as {
+      slotId: string
+      nodeId: string
+    }
+    assert.notEqual(a.nodeId, b.nodeId)
+    const [mine, theirs] = a.nodeId === 'n1' ? [one, two] : [two, one]
+
+    // A node cannot end a slot that lives on another node, nor one that does not exist.
+    theirs.control.send(JSON.stringify({ t: 'context.ended', slotId: a.slotId, reason: 'not mine' }))
+    mine.control.send(JSON.stringify({ t: 'context.ended', slotId: 'no-such-slot', reason: 'x' }))
+    await wait(100)
+    assert.equal(relay.registry.listSlots().length, 2)
+
+    mine.control.send(JSON.stringify({ t: 'context.ended', slotId: a.slotId, reason: 'its browser ended' }))
+    await until(() => relay.registry.listSlots().length === 1, 'the slot to be dropped')
+    assert.deepEqual(
+      relay.registry.listSlots().map((slot) => slot.slotId),
+      [b.slotId]
+    )
+
+    // A heartbeat that still mentions it (the node had not caught up) does not bring it back.
+    mine.heartbeat([{ slotId: a.slotId, runId: 'a', tokenHash: hashToken('x'), createdAt: new Date().toISOString() }])
+    await wait(100)
+    assert.deepEqual(
+      relay.registry.listSlots().map((slot) => slot.slotId),
+      [b.slotId]
+    )
+    // And the freed place is usable at once.
+    assert.equal((await createSlot(base, { runId: 'c', maxLifetimeSeconds: 600 })).status, 201)
+  } finally {
+    one.close()
+    two.close()
+    await relay.close()
+  }
 })

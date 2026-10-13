@@ -3,6 +3,7 @@
  * browser service on this machine". One setting is required:
  *
  *   BROWSERBAY_API_KEY     at least 16 characters; what your services present to create and release browsers
+ *                          (or BROWSERBAY_API_KEYS: one key per service, each optionally confined to a namespace)
  *
  * Everything else has a default (PORT 8788, BROWSERBAY_MAX_CONTEXTS 5; the node settings are in node/main.ts). The node
  * joins the relay over loopback with an enrollment secret made up for this run, so there is nothing else to configure.
@@ -31,7 +32,7 @@ export async function runBox(env: NodeJS.ProcessEnv = process.env) {
 
   const localSecret = randomBytes(24).toString('base64url')
   const relay = createRelayServer({
-    apiKey: config.apiKey,
+    apiKeys: config.apiKeys,
     enrollmentSecrets: [
       { id: 'local', sha256: createHash('sha256').update(localSecret).digest('hex') },
       ...config.remoteEnrollmentSecrets

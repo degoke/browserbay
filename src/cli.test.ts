@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseNodeEnv } from './node/main.js'
-import { parseEnrollmentSecrets } from './relay/config.js'
+import { parseApiKeys, parseEnrollmentSecrets } from './relay/config.js'
 
 // The built CLI, as `bin` runs it: `pnpm test` builds first.
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
@@ -16,6 +16,31 @@ test('cli: `key` makes a different key each time, long enough for the relay', ()
   assert.equal(a.status, 0)
   assert.ok(a.stdout.trim().length >= 16, 'the relay refuses a shorter API key')
   assert.notEqual(a.stdout, b.stdout)
+})
+
+test('cli: `key <name>` also prints the relay entry for it, with its namespace and quota', () => {
+  const plain = cli(['key', 'ci']).stdout
+  const key = /BROWSERBAY_API_KEY=(\S+)/.exec(plain)?.[1]
+  const entry = /BROWSERBAY_API_KEYS=(\S+)/.exec(plain)?.[1]
+  assert.ok(key && entry, plain)
+  assert.deepEqual(parseApiKeys(entry), [{ id: 'ci', sha256: createHash('sha256').update(key).digest('hex') }])
+
+  const confined = cli(['key', 'billing', '--namespace', 'billing', '--quota', '5']).stdout
+  const confinedEntry = /BROWSERBAY_API_KEYS=(\S+)/.exec(confined)?.[1]
+  assert.deepEqual(parseApiKeys(confinedEntry!), [
+    { id: 'billing', sha256: parseApiKeys(confinedEntry!)[0]!.sha256, namespace: 'billing', maxSlots: 5 }
+  ])
+
+  for (const bad of [
+    ['key', 'bad name'],
+    ['key', 'x', '--quota', '5'],
+    ['key', 'x', '--bogus', '1'],
+    ['key', 'x', '--namespace']
+  ]) {
+    const result = cli(bad)
+    assert.equal(result.status, 2, bad.join(' '))
+    assert.equal(result.stdout, '', 'a refused request prints no key')
+  }
 })
 
 test('cli: `secret` prints a pair the node and the relay both accept, and that match each other', () => {

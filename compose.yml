@@ -15,8 +15,12 @@ services:
     # A stopping node waits for slots in use (BROWSERBAY_DRAIN_SECONDS, 120 by default), so Docker has to be patient too.
     stop_grace_period: 130s
     environment:
-      BROWSERBAY_API_KEY: ${BROWSERBAY_API_KEY:?set BROWSERBAY_API_KEY first, e.g. export BROWSERBAY_API_KEY=$(openssl rand -base64 24)}
+      # Set at least one of these (the box refuses to start, and says so in its log, if neither is): an unrestricted key,
+      # e.g. export BROWSERBAY_API_KEY=$(openssl rand -base64 24), and/or per-service keys (BROWSERBAY_API_KEYS; see the README).
+      BROWSERBAY_API_KEY: ${BROWSERBAY_API_KEY:-}
+      BROWSERBAY_API_KEYS: ${BROWSERBAY_API_KEYS:-}
       BROWSERBAY_MAX_CONTEXTS: ${BROWSERBAY_MAX_CONTEXTS:-5}
+      BROWSERBAY_ISOLATION: ${BROWSERBAY_ISOLATION:-context}
       # Optional: lets nodes on other machines join (`name:sha256` entries; see the README). Needs the port published
       # beyond this machine, behind HTTPS.
       BROWSERBAY_ENROLLMENT_SECRETS: ${BROWSERBAY_ENROLLMENT_SECRETS:-}

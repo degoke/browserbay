@@ -10,13 +10,14 @@ type Message = Record<string, any>
 type World = Awaited<ReturnType<typeof setup>>
 
 /** A hub in front of a fake Chromium that already has its own default-context page, as a real one does. */
-async function setup() {
+async function setup({ dedicated = false } = {}) {
   const fake = createFakeChromium()
   const defaultPage = fake.createTarget({ url: 'about:blank' })
   const warnings: string[] = []
   const scope = createCdpScope({
     upstream: { send: fake.receive },
-    logger: { warn: (message) => warnings.push(message) }
+    logger: { warn: (message) => warnings.push(message) },
+    dedicated
   })
   fake.onMessage(scope.onUpstreamMessage)
   await scope.start()
@@ -692,4 +693,165 @@ test('a message the hub cannot handle is dropped and logged, not thrown', async 
   world.fake.createTarget({ browserContextId: contextId }) // announcing it to the client now throws
   await world.fake.flush() // an escaped exception here would end the process
   assert.ok(world.warnings.includes('A message from the browser could not be handled'))
+})
+
+// ---- a dedicated browser: one run, so what keeps runs apart is lifted ---------------------------------------------
+
+/** A dedicated browser with its one run, a client attached to it, and a page open. */
+async function dedicatedRun() {
+  const world = await setup({ dedicated: true })
+  const run = await controller(world, 'slot')
+  await run.attach()
+  const created = await run.client.call('Target.createTarget', { url: 'about:blank' })
+  const announced = run.client
+    .events('Target.attachedToTarget')
+    .find((event) => event.params.targetInfo.targetId === created.result.targetId)!
+  await run.client.call('Runtime.runIfWaitingForDebugger', {}, announced.params.sessionId)
+  return { ...world, ...run, sessionId: announced.params.sessionId as string }
+}
+
+test('dedicated: the browser-wide domains a shared browser refuses are open to the one run', async () => {
+  const shared = await setup()
+  const sharedRun = await controller(shared, 'slot')
+  await sharedRun.attach()
+  const sharedPage = await sharedRun.client.call('Target.createTarget', { url: 'about:blank' })
+  const sharedSession = sharedRun.client
+    .events('Target.attachedToTarget')
+    .find((event) => event.params.targetInfo.targetId === sharedPage.result.targetId)!.params.sessionId
+  for (const method of [
+    'IO.read',
+    'Tracing.start',
+    'Memory.getDOMCounters',
+    'SystemInfo.getInfo',
+    'Storage.getUsageAndQuota'
+  ]) {
+    assert.equal(
+      (await sharedRun.client.call(method, {}, sharedSession)).error?.code,
+      -32601,
+      `${method} on a shared browser`
+    )
+  }
+  assert.equal((await sharedRun.client.call('Tracing.start')).error?.code, -32601, 'browser-level, shared')
+
+  const world = await dedicatedRun()
+  for (const method of [
+    'IO.read',
+    'IO.close',
+    'Tracing.start',
+    'Memory.getDOMCounters',
+    'SystemInfo.getInfo',
+    'Storage.getUsageAndQuota'
+  ]) {
+    const answer = await world.client.call(method, { handle: 'h' }, world.sessionId)
+    assert.equal(answer.error, undefined, `${method} on a dedicated browser`)
+    assert.equal(answer.result.method, method, 'and it reached the page unchanged')
+  }
+  assert.equal((await world.client.call('Tracing.start', { transferMode: 'ReturnAsStream' })).error, undefined)
+  await world.client.call('Tracing.end')
+  assert.equal(world.client.events('Tracing.tracingComplete').length, 1, 'the browser-wide event reaches the client')
+  assert.equal(
+    (await world.client.call('Browser.close')).error?.code,
+    -32601,
+    'the browser itself still is not the client’s to close'
+  )
+})
+
+test('dedicated: the client can make contexts of its own, and they are the run’s', async () => {
+  const world = await dedicatedRun()
+  const { fake, client } = world
+  const first = await client.call('Target.createBrowserContext', {
+    disposeOnDetach: true,
+    proxyServer: 'http://proxy:3128',
+    originsWithUniversalNetworkAccess: ['https://x'],
+    browserContextId: 'ignored',
+    other: 1
+  })
+  const extra = first.result.browserContextId as string
+  assert.ok(extra && extra !== world.contextId)
+  const sent = fake.commands('Target.createBrowserContext').at(-1)!.params
+  assert.deepEqual(
+    sent,
+    { proxyServer: 'http://proxy:3128', disposeOnDetach: false },
+    'only a proxy passes, and it outlives any connection'
+  )
+  assert.deepEqual(fake.commands('Browser.setDownloadBehavior').at(-1)?.params, {
+    behavior: 'deny',
+    eventsEnabled: false,
+    browserContextId: extra
+  })
+
+  assert.deepEqual(
+    (await client.call('Target.getBrowserContexts')).result.browserContextIds.sort(),
+    [world.contextId, extra].sort()
+  )
+
+  // A tab in it is announced paused, listed, and usable like one in the run’s first context.
+  const tab = await client.call('Target.createTarget', { url: 'about:blank', browserContextId: extra })
+  assert.equal(fake.targets.get(tab.result.targetId)?.browserContextId, extra)
+  const attached = client
+    .events('Target.attachedToTarget')
+    .find((event) => event.params.targetInfo.targetId === tab.result.targetId)
+  assert.equal(attached?.params.waitingForDebugger, true)
+  const listed = (await client.call('Target.getTargets')).result.targetInfos.map(
+    (info: { targetId: string }) => info.targetId
+  )
+  assert.ok(listed.includes(tab.result.targetId))
+  await client.call('Storage.setCookies', { cookies: [{ name: 'a' }], browserContextId: extra })
+  assert.equal(fake.cookies(extra).length, 1)
+  assert.equal(fake.cookies(world.contextId).length, 0, 'cookies went to the context that was named')
+
+  // A context that is not the run’s (the browser’s own default, anything else) is still not reachable.
+  const foreign = fake.createTarget({ browserContextId: 'foreign' })
+  await fake.flush()
+  assert.ok(
+    !(await client.call('Target.getTargets')).result.targetInfos.some(
+      (info: { targetId: string }) => info.targetId === foreign
+    )
+  )
+  assert.equal((await client.call('Target.createTarget', { browserContextId: 'foreign' })).error?.code, -32602)
+  assert.equal((await client.call('Target.disposeBrowserContext', { browserContextId: 'foreign' })).error?.code, -32602)
+  assert.equal(
+    (await client.call('Target.disposeBrowserContext', { browserContextId: fake.DEFAULT_CONTEXT })).error?.code,
+    -32602
+  )
+  assert.equal((await client.call('Storage.getCookies', { browserContextId: 'foreign' })).error?.code, -32602)
+
+  // It can close its extra contexts, never the slot’s own, and releasing the slot disposes them all.
+  assert.equal(
+    (await client.call('Target.disposeBrowserContext', { browserContextId: world.contextId })).error?.code,
+    -32602
+  )
+  const second = (await client.call('Target.createBrowserContext')).result.browserContextId as string
+  assert.equal((await client.call('Target.disposeBrowserContext', { browserContextId: second })).error, undefined)
+  assert.ok(!fake.contexts.has(second))
+  assert.ok(!(await client.call('Target.getBrowserContexts')).result.browserContextIds.includes(second))
+  await world.scope.disposeRun('slot')
+  assert.ok(!fake.contexts.has(extra) && !fake.contexts.has(world.contextId), 'every context of the run is disposed')
+})
+
+test('shared: a client cannot make or close contexts, only dedicated ones can', async () => {
+  const world = await setup()
+  const run = await controller(world, 'slot')
+  for (const method of ['Target.createBrowserContext', 'Target.disposeBrowserContext']) {
+    assert.equal((await run.client.call(method, { browserContextId: run.contextId })).error?.code, -32601, method)
+  }
+})
+
+test('dedicated: what keeps the node safe stays fenced, because it never depended on who else was on the browser', async () => {
+  const world = await dedicatedRun()
+  const { client, sessionId } = world
+  for (const url of ['file:///etc/passwd', 'chrome://version', 'view-source:https://a', 'about:version']) {
+    assert.equal((await client.call('Page.navigate', { url }, sessionId)).error?.code, -32602, url)
+    assert.equal((await client.call('Target.createTarget', { url })).error?.code, -32602, url)
+  }
+  for (const method of ['DOM.setFileInputFiles', 'Page.setDownloadBehavior']) {
+    assert.equal((await client.call(method, {}, sessionId)).error?.code, -32601, method)
+  }
+  const download = await client.call('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: '/tmp' })
+  assert.equal(download.error, undefined)
+  assert.deepEqual(world.fake.commands('Browser.setDownloadBehavior').at(-1)?.params, {
+    behavior: 'deny',
+    eventsEnabled: false,
+    browserContextId: world.contextId
+  })
 })

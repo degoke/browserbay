@@ -199,6 +199,14 @@ export function createFakeChromium() {
       case 'Browser.close':
         closed = true
         return reply(id, {})
+      case 'Tracing.start':
+      case 'IO.read':
+      case 'IO.close':
+      case 'Memory.getDOMCounters':
+        return reply(id, {})
+      case 'Tracing.end':
+        reply(id, {})
+        return emit('Tracing.tracingComplete', { stream: 'trace-stream' })
       case 'Browser.setDownloadBehavior':
       case 'Browser.grantPermissions':
       case 'Browser.resetPermissions':

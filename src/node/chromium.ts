@@ -23,8 +23,9 @@ export function findChromium(env: NodeJS.ProcessEnv = process.env): string | nul
  * anything on the network to reach.
  *
  * `sandbox: false` adds --no-sandbox, which a container running Chromium as an unprivileged user usually needs
- * (Chromium's sandbox wants user namespaces the platform rarely grants). The BrowserContext per slot is the isolation
- * between slots, unless the sandbox can be enabled; see "Isolation" in the README.
+ * (Chromium's sandbox wants user namespaces the platform rarely grants). The BrowserContext per slot (or, with
+ * BROWSERBAY_ISOLATION=process, a Chromium per slot) is the isolation between slots, unless the sandbox can be
+ * enabled; see "Isolation" in the README.
  */
 export function chromiumArgs({
   profileDir,
