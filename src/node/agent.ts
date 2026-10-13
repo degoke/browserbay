@@ -23,7 +23,7 @@ import {
   type NodeToRelay,
   type RelayToNode
 } from '../protocol.js'
-import type { CdpScope, ScopeClient } from './scope.js'
+import type { RunHost, ScopeClient } from './scope.js'
 
 const OPEN = 1
 
@@ -57,8 +57,8 @@ export interface AgentOptions {
   relayUrl: string
   enrollmentSecret: string
   nodeId: string
-  /** A started scope hub in front of this node's Chromium. */
-  scope: CdpScope
+  /** What holds this node's browsers: a started scope hub in front of its Chromium, or a Chromium per slot. */
+  scope: RunHost
   maxContexts?: number
   heartbeatMs?: number
   reconnectMinMs?: number
@@ -122,7 +122,11 @@ export function startAgent({
   }
 
   const contexts = new Map<string, Context>()
-  /** Creates in flight, counted against capacity so two arriving together cannot both take the last slot. */
+  /**
+   * Creates in flight, and contexts being closed: both still hold a browser, so both count against capacity. Two creates
+   * arriving together cannot both take the last slot, and a slot released and re-acquired at once cannot start a new
+   * browser while the old one is still shutting down (it matters when a slot is a whole Chromium).
+   */
   let reserved = 0
   const streams = new Set<WebSocket>()
   let control: WebSocket | null = null
@@ -279,10 +283,15 @@ export function startAgent({
     if (!context) return
     clearTimeout(context.timer)
     contexts.delete(slotId)
+    reserved++
     log('info', 'Closing a context', { slotId, reason })
-    await scope
-      .disposeRun(slotId)
-      .catch((error) => log('warn', 'Could not close a context', { slotId, error: String(error) }))
+    try {
+      await scope
+        .disposeRun(slotId)
+        .catch((error) => log('warn', 'Could not close a context', { slotId, error: String(error) }))
+    } finally {
+      reserved--
+    }
     sendHeartbeat()
     notifyIdle()
   }
@@ -332,6 +341,14 @@ export function startAgent({
   }
 
   // ---- lifecycle --------------------------------------------------------------------------------------------
+
+  // A slot's own browser that dies takes only that slot with it: end the context rather than keep reporting it live.
+  scope.onRunEnded?.((slotId, reason) => {
+    if (!contexts.has(slotId)) return
+    // Say so now, so the relay stops handing out a slot that is gone instead of waiting to notice it in a heartbeat.
+    sendControl({ t: 'context.ended', slotId, reason })
+    void releaseContext(slotId, reason)
+  })
 
   connect()
 

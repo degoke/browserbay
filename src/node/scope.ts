@@ -17,6 +17,10 @@
  *     everything the client held: a paused tab is resumed and its sessions are detached.
  *   - What a client can ask the machine for is limited (no navigating to file: or chrome:, no file paths into a page, no
  *     downloads). That keeps a browser's pages on the web; it does not make a client harmless. See "Trust" in the README.
+ *   - With `dedicated: true` the Chromium behind the hub serves exactly one run (the node started it for that slot alone),
+ *     so the fences that exist to keep runs apart are lifted: the browser-wide domains (IO, Tracing, Storage, Memory,
+ *     SystemInfo) are open, and the client may make contexts of its own (`browser.newContext()`), which belong to the run
+ *     like its first one. The fences around the machine stay: nothing about them depends on who else is on the browser.
  *
  * No dependencies and no sockets: the caller supplies the upstream connection and a transport per client, so the same
  * code is tested against a fake Chromium and run against a real one.
@@ -55,6 +59,18 @@ export interface CdpScope {
   connect(runKey: string, transport: ScopeTransport): ScopeClient
   onUpstreamMessage(text: string): void
   onUpstreamClosed(): void
+}
+
+/**
+ * What the agent needs of whatever holds a node's browsers: the hub of one shared Chromium, or (process isolation) a
+ * Chromium of its own per slot. `CdpScope` is the first; node/process-host.ts is the second.
+ */
+export interface RunHost {
+  createRun(runKey: string): Promise<unknown>
+  disposeRun(runKey: string): Promise<void>
+  connect(runKey: string, transport: ScopeTransport): ScopeClient
+  /** Told when a run's browser ends on its own (its Chromium crashed), so the node can end the slot instead of reporting it live. */
+  onRunEnded?(listener: (runKey: string, reason: string) => void): void
 }
 
 /** DevTools parameters and results are open-ended; the hub only looks at the few fields it routes on. */
@@ -129,6 +145,8 @@ interface SessionRecord {
 
 interface Run {
   contextId: string
+  /** The run's own context and, on a dedicated browser, any the client made (all of them are the run's). */
+  contexts: Set<string>
   controller: Client | null
   clients: Set<Client>
 }
@@ -161,6 +179,9 @@ const SESSION_TARGET_METHODS = new Set(['Target.setAutoAttach', 'Target.detachFr
  * rules out page.pdf() and tracing on a shared browser).
  */
 const SESSION_DENIED_DOMAINS = new Set(['SystemInfo', 'Tracing', 'Storage', 'Memory', 'IO'])
+
+/** What `Target.createBrowserContext` may carry on a dedicated browser: where the context's traffic goes, nothing else. */
+const CREATE_CONTEXT_PARAMS = ['proxyServer', 'proxyBypassList']
 
 /**
  * Methods a page session may not call because they hand the client something of the machine the browser runs on: a
@@ -202,12 +223,18 @@ const RESPONSE_HEAD = /^\{"id":(\d+)/
 export function createCdpScope({
   upstream,
   logger = {},
-  requestTimeoutMs = 30_000
+  requestTimeoutMs = 30_000,
+  dedicated = false
 }: {
   upstream: ScopeUpstream
   logger?: ScopeLogger
   /** How long a request to the browser may go unanswered before it fails (default 30 s). */
   requestTimeoutMs?: number
+  /**
+   * This browser serves one run and nothing else, so what keeps runs apart is lifted: see the top of this file. Never
+   * set it on a browser that more than one run is created on.
+   */
+  dedicated?: boolean
 }): CdpScope {
   const log = (level: keyof ScopeLogger, message: string, fields?: Record<string, unknown>) =>
     logger[level]?.(message, fields)
@@ -283,6 +310,11 @@ export function createCdpScope({
       }
     }
   }
+
+  /** Whether a context is the client's: its run's own, or (dedicated) one the client made. */
+  const ownsContext = (client: Client, contextId: string | undefined) =>
+    contextId !== undefined &&
+    (contextId === client.contextId || Boolean(runs.get(client.runKey)?.contexts.has(contextId)))
 
   const runOf = (contextId: string | undefined) => {
     const runKey = contextId === undefined ? undefined : contextToRun.get(contextId)
@@ -378,6 +410,11 @@ export function createCdpScope({
         return fanOutDiscovery(info.browserContextId, text)
       }
       default:
+        // On a dedicated browser the browser-wide domains the client may use (Tracing's data, say) belong to its one run.
+        if (dedicated && method && SESSION_DENIED_DOMAINS.has(method.slice(0, method.indexOf('.')))) {
+          for (const run of runs.values()) for (const client of run.clients) client.sendRaw(text)
+          return
+        }
         // Browser.downloadWillBegin and friends carry no context, so they cannot be attributed to one run.
         return
     }
@@ -436,18 +473,18 @@ export function createCdpScope({
   function handleBrowserCommand(client: Client, message: Command) {
     const { id, method } = message
     const params = message.params ?? {}
-    const ownsTarget = (targetId: string) => targets.get(targetId)?.browserContextId === client.contextId
+    const ownsTarget = (targetId: string) => ownsContext(client, targets.get(targetId)?.browserContextId)
     const notFound = () => client.sendError(id, ERR_INVALID_PARAMS, 'No target with given id found')
+    const contextNotFound = () =>
+      client.sendError(id, ERR_INVALID_PARAMS, 'Failed to find browser context with id ' + params.browserContextId)
     const withContext = () => {
-      if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) {
-        return client.sendError(
-          id,
-          ERR_INVALID_PARAMS,
-          'Failed to find browser context with id ' + params.browserContextId
-        )
+      if (params.browserContextId !== undefined && !ownsContext(client, params.browserContextId)) {
+        return contextNotFound()
       }
-      forward(client, message, { params: { ...params, browserContextId: client.contextId } })
+      forward(client, message, { params: { ...params, browserContextId: params.browserContextId ?? client.contextId } })
     }
+
+    if (dedicated && handleDedicatedBrowserCommand(client, message, { contextNotFound })) return
 
     switch (method) {
       case 'Browser.getVersion':
@@ -461,7 +498,7 @@ export function createCdpScope({
         client.send({ id, result: {} })
         if (client.discover) {
           for (const info of targets.values()) {
-            if (info.browserContextId === client.contextId) {
+            if (ownsContext(client, info.browserContextId)) {
               client.send({ method: 'Target.targetCreated', params: { targetInfo: info } })
             }
           }
@@ -472,21 +509,24 @@ export function createCdpScope({
         return forward(client, message, {
           transform: (result) => ({
             ...result,
-            targetInfos: (result.targetInfos ?? []).filter(
-              (info: TargetInfo) => info.browserContextId === client.contextId
+            targetInfos: (result.targetInfos ?? []).filter((info: TargetInfo) =>
+              ownsContext(client, info.browserContextId)
             )
           })
         })
 
       case 'Target.getBrowserContexts':
-        return client.send({ id, result: { browserContextIds: [client.contextId] } })
+        return client.send({
+          id,
+          result: { browserContextIds: [...(runs.get(client.runKey)?.contexts ?? [client.contextId])] }
+        })
 
       case 'Target.getTargetInfo':
         if (params.targetId === undefined) return forward(client, message)
         return ownsTarget(params.targetId) ? forward(client, message) : notFound()
 
       case 'Target.createTarget': {
-        if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) return notFound()
+        if (params.browserContextId !== undefined && !ownsContext(client, params.browserContextId)) return notFound()
         if (params.url !== undefined && !navigableUrl(params.url)) {
           log('warn', 'A target on a refused URL was not created', { runKey: client.runKey })
           return client.sendError(id, ERR_INVALID_PARAMS, URL_REFUSED)
@@ -494,7 +534,9 @@ export function createCdpScope({
         const allowed = Object.fromEntries(
           CREATE_TARGET_PARAMS.filter((key) => key in params).map((key) => [key, params[key]])
         )
-        return forward(client, message, { params: { ...allowed, browserContextId: client.contextId } })
+        return forward(client, message, {
+          params: { ...allowed, browserContextId: params.browserContextId ?? client.contextId }
+        })
       }
 
       case 'Target.closeTarget':
@@ -532,6 +574,81 @@ export function createCdpScope({
     }
   }
 
+  /**
+   * What a client of a dedicated browser may do beyond a shared one's: make and close contexts of its own, and use the
+   * browser-wide domains. Returns whether it handled the command; anything else takes the usual path.
+   */
+  function handleDedicatedBrowserCommand(
+    client: Client,
+    message: Command,
+    { contextNotFound }: { contextNotFound: () => void }
+  ): boolean {
+    const { id, method } = message
+    const params = message.params ?? {}
+    switch (method) {
+      case 'Target.createBrowserContext':
+        void createExtraContext(client, message)
+        return true
+      case 'Target.disposeBrowserContext': {
+        const run = runs.get(client.runKey)
+        if (!run || !run.contexts.has(params.browserContextId)) {
+          contextNotFound()
+        } else if (params.browserContextId === client.contextId) {
+          // The slot is its context; the way to end it is to release the slot.
+          client.sendError(id, ERR_INVALID_PARAMS, "The slot's own browser context cannot be closed; release the slot")
+        } else {
+          forward(client, message, { after: () => forgetContext(run, params.browserContextId) })
+        }
+        return true
+      }
+    }
+    const domain = method.slice(0, method.indexOf('.'))
+    // Storage's per-context calls (cookies) take the usual path, which fills in or checks the context.
+    if (SESSION_DENIED_DOMAINS.has(domain) && !CONTEXT_METHODS.has(method)) {
+      if (params.browserContextId !== undefined && !ownsContext(client, params.browserContextId)) {
+        contextNotFound()
+      } else {
+        forward(client, message)
+      }
+      return true
+    }
+    return false
+  }
+
+  /** A context the client of a dedicated browser asked for: made like the run's own (downloads denied), then the run's. */
+  async function createExtraContext(client: Client, message: Command) {
+    const run = runs.get(client.runKey)
+    if (!run) return
+    const params = message.params ?? {}
+    const allowed = Object.fromEntries(
+      CREATE_CONTEXT_PARAMS.filter((key) => key in params).map((key) => [key, params[key]])
+    )
+    let created: string | undefined
+    try {
+      const result = await request('Target.createBrowserContext', { ...allowed, disposeOnDetach: false })
+      created = String(result.browserContextId)
+      await request('Browser.setDownloadBehavior', {
+        behavior: 'deny',
+        eventsEnabled: false,
+        browserContextId: created
+      })
+      // The run ended while this was being made: nobody owns it.
+      if (runs.get(client.runKey) !== run) throw new Error('The run ended')
+      run.contexts.add(created)
+      contextToRun.set(created, client.runKey)
+      client.send({ id: message.id, result: { browserContextId: created } })
+    } catch (error) {
+      if (created) void request('Target.disposeBrowserContext', { browserContextId: created }).catch(ignore)
+      client.sendError(message.id, ERR_INTERNAL, `The browser context could not be created: ${String(error)}`)
+    }
+  }
+
+  function forgetContext(run: Run, contextId: string) {
+    run.contexts.delete(contextId)
+    contextToRun.delete(contextId)
+    for (const [id, info] of targets) if (info.browserContextId === contextId) targets.delete(id)
+  }
+
   async function handleSetAutoAttach(client: Client, message: Command) {
     const run = runs.get(client.runKey)
     if (!run) return
@@ -543,7 +660,7 @@ export function createCdpScope({
     run.controller = client
     // Tabs that already exist in this run's context, in the order Chromium reports them. They are not paused.
     for (const info of [...targets.values()]) {
-      if (info.browserContextId !== run.contextId || !DELIVERABLE_TYPES.has(info.type)) continue
+      if (!run.contexts.has(info.browserContextId!) || !DELIVERABLE_TYPES.has(info.type)) continue
       if (client.delivered.has(info.targetId)) continue
       client.delivered.add(info.targetId)
       let attached: Params
@@ -582,12 +699,12 @@ export function createCdpScope({
     const denied =
       (domain === 'Target' && !SESSION_TARGET_METHODS.has(method)) ||
       (domain === 'Browser' && !SESSION_BROWSER_METHODS.has(method)) ||
-      SESSION_DENIED_DOMAINS.has(domain)
+      (SESSION_DENIED_DOMAINS.has(domain) && !dedicated)
     if (denied) {
       log('warn', 'A session-level command was refused', { method, runKey: client.runKey })
       return client.sendError(id, ERR_METHOD_NOT_FOUND, `${method} is not available on a shared browser`, sessionId)
     }
-    if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) {
+    if (params.browserContextId !== undefined && !ownsContext(client, params.browserContextId)) {
       return client.sendError(id, ERR_INVALID_PARAMS, 'Failed to find browser context', sessionId)
     }
     if (SESSION_DENIED_METHODS.has(method) || (method === 'Input.dispatchDragEvent' && params.data?.files?.length)) {
@@ -603,7 +720,7 @@ export function createCdpScope({
       return client.sendError(id, ERR_INVALID_PARAMS, URL_REFUSED, sessionId)
     }
     if (method === 'Browser.getWindowForTarget') {
-      if (params.targetId !== undefined && targets.get(params.targetId)?.browserContextId !== client.contextId) {
+      if (params.targetId !== undefined && !ownsContext(client, targets.get(params.targetId)?.browserContextId)) {
         return client.sendError(id, ERR_INVALID_PARAMS, 'No target with given id found', sessionId)
       }
       return forward(client, message, {
@@ -742,7 +859,12 @@ export function createCdpScope({
         throw error
       }
     )
-    runs.set(runKey, { contextId: browserContextId, controller: null, clients: new Set() })
+    runs.set(runKey, {
+      contextId: browserContextId,
+      contexts: new Set([browserContextId]),
+      controller: null,
+      clients: new Set()
+    })
     contextToRun.set(browserContextId, runKey)
     return { contextId: browserContextId }
   }
@@ -751,10 +873,12 @@ export function createCdpScope({
     const run = runs.get(runKey)
     if (!run) return
     runs.delete(runKey)
-    contextToRun.delete(run.contextId)
     for (const client of [...run.clients]) evict(client, 4001, 'The slot was released')
-    for (const [id, info] of targets) if (info.browserContextId === run.contextId) targets.delete(id)
-    await request('Target.disposeBrowserContext', { browserContextId: run.contextId }).catch(ignore)
+    const owned = [...run.contexts]
+    for (const contextId of owned) forgetContext(run, contextId)
+    await Promise.all(
+      owned.map((browserContextId) => request('Target.disposeBrowserContext', { browserContextId }).catch(ignore))
+    )
   }
 
   /** Chromium went away: every context and page with it. Clients are told with a code they can tell from a normal close. */

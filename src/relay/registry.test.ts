@@ -412,3 +412,28 @@ test('a node that refuses or fails a create is reported, not swallowed', async (
     ['silent', 'The node did not confirm the new context in time']
   ])
 })
+
+test('slots can be listed and counted for one namespace’s run ids without summarising the rest', () => {
+  const registry = createNodeRegistry()
+  const node = fakeLink(registry, 'n')
+  registry.registerNode({
+    id: 'n',
+    maxContexts: 5,
+    link: node.link,
+    contexts: [report('s1', 't1', 'a:one'), report('s2', 't2', 'b:one'), report('s3', 't3', 'a:two')]
+  })
+  const inA = (runId: string) => runId.startsWith('a:')
+  assert.equal(registry.countSlots(inA), 2)
+  assert.equal(
+    registry.countSlots(() => false),
+    0
+  )
+  assert.deepEqual(
+    registry
+      .listSlots(inA)
+      .map((slot) => slot.runId)
+      .sort(),
+    ['a:one', 'a:two']
+  )
+  assert.equal(registry.listSlots().length, 3, 'no filter, every slot')
+})

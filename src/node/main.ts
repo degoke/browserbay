@@ -7,9 +7,13 @@
  *   BROWSERBAY_NODE_ID                       a name for this node, unique per replica (default: the hostname)
  *   BROWSERBAY_MAX_CONTEXTS                  concurrent slots on this node (default 5; size it to the node's memory)
  *   BROWSERBAY_DRAIN_SECONDS                 how long a stopping node waits for its slots (default 120)
+ *   BROWSERBAY_ISOLATION                     'context' (default): one shared Chromium, a BrowserContext per slot;
+ *                                            'process': a Chromium per slot (more memory, stronger isolation, and a
+ *                                            slot's client gets page.pdf(), tracing and browser.newContext())
  *   BROWSERBAY_CHROMIUM_SANDBOX              'true' keeps Chromium's own sandbox on (needs user namespaces)
  *   BROWSERBAY_HEADLESS                      'false' for a headful browser (needs a display)
- *   BROWSERBAY_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory)
+ *   BROWSERBAY_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory); with
+ *                                            BROWSERBAY_ISOLATION=process, where each slot's profile is made
  *   BROWSERBAY_CHROMIUM_EXECUTABLE           a Chromium other than the one in the image
  *   BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH      comma-separated names of environment variables the browser should also see
  *                                            (it gets only an allowlist otherwise; never BROWSERBAY_* ones)
@@ -20,7 +24,7 @@ import { hostname } from 'node:os'
 import { errorMessage } from '../errors.js'
 import { NODE_LIMITS } from '../protocol.js'
 import type { AgentLogger } from './agent.js'
-import { ConfigError, startBrowserNode, type BrowserNode } from './browser-node.js'
+import { ConfigError, startBrowserNode, type BrowserNode, type Isolation } from './browser-node.js'
 
 export interface NodeSettings {
   nodeId: string
@@ -29,6 +33,7 @@ export interface NodeSettings {
   profileDir: string | undefined
   headless: boolean
   sandbox: boolean
+  isolation: Isolation
 }
 
 /** The settings of the browser itself, shared by `browserbay node` and the all-in-one `browserbay start`. */
@@ -53,10 +58,15 @@ export function parseNodeSettings(env: NodeJS.ProcessEnv = process.env): NodeSet
   if (!Number.isFinite(drainSeconds) || drainSeconds < 0) {
     throw new Error('BROWSERBAY_DRAIN_SECONDS must be a number of seconds, 0 or more.')
   }
+  const isolation = (env.BROWSERBAY_ISOLATION ?? '').trim() || 'context'
+  if (isolation !== 'context' && isolation !== 'process') {
+    throw new Error('BROWSERBAY_ISOLATION must be "context" or "process".')
+  }
   return {
     nodeId,
     maxContexts,
     drainSeconds,
+    isolation,
     profileDir: env.BROWSERBAY_PROFILE_DIR || undefined,
     headless: env.BROWSERBAY_HEADLESS !== 'false',
     sandbox: env.BROWSERBAY_CHROMIUM_SANDBOX === 'true'

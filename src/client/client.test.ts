@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TOKEN_HEADER } from '../protocol.js'
-import { BrowserBayError, NoCapacityError, createBrowserBay, type BrowserBayOptions } from './index.js'
+import {
+  BrowserBayError,
+  ForbiddenError,
+  NoCapacityError,
+  QuotaExceededError,
+  createBrowserBay,
+  type BrowserBayOptions
+} from './index.js'
 
 const API_KEY = 'box-api-key-0123456789'
 const BOX = 'https://browsers.example.com'
@@ -262,6 +269,15 @@ test('client: a full box is a NoCapacityError; other failures carry the status a
   await assert.rejects(
     () => client(fakeBox({ createBody: { slotId: 'slot-1' } }).impl).acquire(acquireOptions('r')),
     /incomplete slot/
+  )
+  // A key confined to a namespace, or out of quota, is told apart from a box that is merely full.
+  await assert.rejects(
+    () => client(fakeBox({ createStatus: 403 }).impl).acquire(acquireOptions('r')),
+    (error: unknown) => error instanceof ForbiddenError && error.status === 403 && /namespace/.test(error.message)
+  )
+  await assert.rejects(
+    () => client(fakeBox({ createStatus: 429 }).impl).acquire(acquireOptions('r')),
+    (error: unknown) => error instanceof QuotaExceededError && error instanceof BrowserBayError && error.status === 429
   )
   const down = client((async () => {
     throw new TypeError('fetch failed')

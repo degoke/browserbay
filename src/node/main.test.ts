@@ -23,7 +23,8 @@ test('node settings: the defaults, and each of the node’s own settings read fr
     BROWSERBAY_DRAIN_SECONDS: '30',
     BROWSERBAY_PROFILE_DIR: '/data/profile',
     BROWSERBAY_HEADLESS: 'false',
-    BROWSERBAY_CHROMIUM_SANDBOX: 'true'
+    BROWSERBAY_CHROMIUM_SANDBOX: 'true',
+    BROWSERBAY_ISOLATION: 'process'
   })
   assert.deepEqual(set, {
     nodeId: 'laptop',
@@ -31,8 +32,14 @@ test('node settings: the defaults, and each of the node’s own settings read fr
     drainSeconds: 30,
     profileDir: '/data/profile',
     headless: false,
-    sandbox: true
+    sandbox: true,
+    isolation: 'process'
   })
+  assert.equal(defaults.isolation, 'context', 'a shared Chromium unless asked otherwise')
+  assert.equal(parseNodeSettings({ BROWSERBAY_ISOLATION: '' }).isolation, 'context', 'empty is not set')
+  for (const value of ['Process', 'vm', 'per-slot']) {
+    assert.throws(() => parseNodeSettings({ BROWSERBAY_ISOLATION: value }), /BROWSERBAY_ISOLATION must be/, value)
+  }
 })
 
 test('node settings: what the relay would refuse is refused here, at startup, with the setting named', () => {
@@ -75,6 +82,29 @@ test('a stand-alone node needs the relay address and a long enough enrollment se
     () => parseNodeEnv({ BROWSERBAY_RELAY_URL: 'https://relay.example.com', BROWSERBAY_ENROLLMENT_SECRET: 'short' }),
     /at least 16 characters/
   )
+})
+
+test('process isolation checks a Chromium path exists, but leaves a bare command name to PATH as context mode does', async () => {
+  const missing = join(tmpdir(), 'browserbay-no-such-chrome')
+  await assert.rejects(
+    startBrowserNode({
+      relayUrl: 'https://relay.example.com',
+      enrollmentSecret: SECRET,
+      nodeId: 'n',
+      isolation: 'process',
+      executable: missing
+    }),
+    (error) => error instanceof ConfigError && /Chromium was not found at/.test(error.message)
+  )
+  // `chromium` or `google-chrome` is found by spawn through PATH, so it is not refused up front.
+  const node = await startBrowserNode({
+    relayUrl: 'https://relay.example.com',
+    enrollmentSecret: SECRET,
+    nodeId: 'n',
+    isolation: 'process',
+    executable: 'chromium-found-through-path'
+  })
+  await node.close()
 })
 
 test('starting a node refuses, before anything is launched, what the operator has to fix', async () => {

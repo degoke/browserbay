@@ -27,6 +27,16 @@ export const NODE_PROTOCOL_VERSION = 1
 const NAME_CHARS = '[\\w.-]'
 export const NAME_PATTERN = new RegExp(`^${NAME_CHARS}+$`)
 
+/** A key's quota of slots: a whole number of 1 or more, up to six digits. */
+export const QUOTA_PATTERN = /^[1-9]\d{0,5}$/
+
+/** Why a key's quota cannot be used, or undefined. Shared by the relay's settings and `browserbay key`. */
+export function quotaProblem(quota: string, namespace: string | undefined) {
+  if (!QUOTA_PATTERN.test(quota)) return 'a quota must be a whole number of 1 or more'
+  if (!namespace) return "a quota needs a namespace: it counts that namespace's slots"
+  return undefined
+}
+
 /** What the relay accepts in a node's hello. A node that exceeds them is refused (close code 4400). */
 export const NODE_LIMITS = {
   /** The most slots one node may offer. */
@@ -125,8 +135,19 @@ export interface ListNodesResponse {
   nodes: NodeSummary[]
 }
 
+/**
+ * 403 `forbidden`: the API key is valid but not allowed this (a run id outside its namespace, or `GET /v1/nodes` from a key
+ * that has one). 429 `quota_exceeded`: the key's namespace already holds as many slots as its quota allows.
+ */
 export interface RelayErrorResponse {
-  error: 'unauthorized' | 'not_found' | 'no_capacity' | 'invalid_request' | 'node_unavailable'
+  error:
+    | 'unauthorized'
+    | 'forbidden'
+    | 'not_found'
+    | 'no_capacity'
+    | 'quota_exceeded'
+    | 'invalid_request'
+    | 'node_unavailable'
 }
 
 // ---- Node control socket (wss://relay/v1/nodes/connect) --------------------------------------------------------
@@ -153,6 +174,12 @@ export type NodeToRelay =
   | { t: 'heartbeat'; draining: boolean; contexts: NodeContextReport[] }
   | { t: 'context.created'; reqId: string }
   | { t: 'context.failed'; reqId: string; message: string }
+  /**
+   * A context ended on the node's own account (process isolation: the slot's Chromium crashed). The relay drops the slot at
+   * once instead of waiting for heartbeats to stop mentioning it. A relay that does not know this frame ignores it, and
+   * gets there by the heartbeats; so it needs no protocol version of its own.
+   */
+  | { t: 'context.ended'; slotId: string; reason: string }
   | { t: 'stream.failed'; streamId: string; message: string }
 
 export type RelayToNode =

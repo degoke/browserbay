@@ -29,8 +29,9 @@ export interface BrowserBayOptions {
   apiKey: string
   /**
    * Marks this service's slots (as a prefix on their run ids) so `list` and `reap` leave another service's alone when
-   * several share a box. Letters, digits, `_`, `.` and `-` only. A naming convention, not an access control: anything
-   * holding the API key can still reach any slot.
+   * several share a box. Letters, digits, `_`, `.` and `-` only. On its own a naming convention, not an access control:
+   * anything holding an unrestricted API key can still reach any slot. Give each service its own key confined to its
+   * namespace on the box (`BROWSERBAY_API_KEYS`) and the box enforces it.
    */
   namespace?: string
   /**
@@ -95,7 +96,10 @@ export interface ReapOptions {
 }
 
 export interface BrowserBay {
-  /** Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait. */
+  /**
+   * Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait, `QuotaExceededError` when the key's
+   * quota is used up, and `ForbiddenError` when the key may not use this run id (it is confined to another namespace).
+   */
   acquire(options: AcquireOptions): Promise<Slot>
   /** A slot you stored earlier. Makes no request; use `isAlive()` to find out whether it still exists. */
   slot(stored: StoredSlot): Slot
@@ -132,6 +136,25 @@ export class NoCapacityError extends BrowserBayError {
   constructor() {
     super('No browser capacity is available right now', 503)
     this.name = 'NoCapacityError'
+  }
+}
+
+/** The box's API key is valid but may not do this: a run id outside the key's namespace, or the node list. */
+export class ForbiddenError extends BrowserBayError {
+  constructor() {
+    super(
+      "The API key is not allowed to do this. A key confined to a namespace can only use run ids in it (set the client's `namespace` to match) and cannot list nodes",
+      403
+    )
+    this.name = 'ForbiddenError'
+  }
+}
+
+/** The API key's namespace already holds as many browsers as its quota allows. Release one, or ask the box's operator. */
+export class QuotaExceededError extends BrowserBayError {
+  constructor() {
+    super("This API key's quota of browsers is used up", 429)
+    this.name = 'QuotaExceededError'
   }
 }
 
@@ -310,6 +333,8 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
       )
       // The box held the request for the whole wait and still found no node with room (or lost the node it chose).
       if (response.status === 503) throw new NoCapacityError()
+      if (response.status === 403) throw new ForbiddenError()
+      if (response.status === 429) throw new QuotaExceededError()
       if (!response.ok)
         throw new BrowserBayError(`The browser service could not start a browser (${response.status})`, response.status)
       const slot: Partial<CreateSlotResponse> = (await response.json().catch(() => ({}))) ?? {}

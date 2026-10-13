@@ -343,6 +343,12 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
       return dropSlot(slotId, 'released', true)
     },
 
+    /** A node says a context it held ended on its own. Only the node that holds a slot can end it this way. */
+    endFromNode(nodeId: string, slotId: string, reason: string) {
+      if (slots.get(slotId)?.nodeId !== nodeId) return false
+      return dropSlot(slotId, reason, false)
+    },
+
     /** The slot, only for the holder of its run token. */
     authorize(slotId: string, token: string | undefined) {
       const slot = slots.get(slotId)
@@ -366,13 +372,23 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
       }
     },
 
-    listSlots(): SlotSummary[] {
-      return [...slots.values()].map((slot) => ({
-        slotId: slot.slotId,
-        runId: slot.runId,
-        nodeId: slot.nodeId,
-        createdAt: new Date(slot.createdAt).toISOString()
-      }))
+    /** Slots, optionally only those whose run id `include` accepts (so another namespace's are never summarised). */
+    listSlots(include?: (runId: string) => boolean): SlotSummary[] {
+      return [...slots.values()]
+        .filter((slot) => !include || include(slot.runId))
+        .map((slot) => ({
+          slotId: slot.slotId,
+          runId: slot.runId,
+          nodeId: slot.nodeId,
+          createdAt: new Date(slot.createdAt).toISOString()
+        }))
+    },
+
+    /** How many slots have a run id `include` accepts, without building summaries. */
+    countSlots(include: (runId: string) => boolean) {
+      let count = 0
+      for (const slot of slots.values()) if (include(slot.runId)) count++
+      return count
     },
 
     getSlot(slotId: string): SlotSummary | null {
