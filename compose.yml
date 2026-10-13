@@ -1,22 +1,22 @@
 # One box on this machine:
-#   export BROWSERBOX_API_KEY=$(openssl rand -base64 24)    # keep it: your projects present it
+#   export BROWSERBAY_API_KEY=$(openssl rand -base64 24)    # keep it: your projects present it
 #   docker compose up -d
 # Point a project at http://localhost:8788 with that key. It listens on this machine only: put it behind HTTPS (a
 # reverse proxy or a tunnel) before anything else talks to it, because the key and the slot tokens travel to it.
 # See the README for adding nodes on other machines.
 services:
-  browserbox:
+  browserbay:
     build: .
-    image: browserbox
+    image: browserbay
     init: true
     restart: always
     ports:
       - '127.0.0.1:${PORT:-8788}:8788'
-    # A stopping node waits for slots in use (BROWSERBOX_DRAIN_SECONDS, 120 by default), so Docker has to be patient too.
+    # A stopping node waits for slots in use (BROWSERBAY_DRAIN_SECONDS, 120 by default), so Docker has to be patient too.
     stop_grace_period: 130s
     environment:
-      BROWSERBOX_API_KEY: ${BROWSERBOX_API_KEY:?set BROWSERBOX_API_KEY first, e.g. export BROWSERBOX_API_KEY=$(openssl rand -base64 24)}
-      BROWSERBOX_MAX_CONTEXTS: ${BROWSERBOX_MAX_CONTEXTS:-5}
+      BROWSERBAY_API_KEY: ${BROWSERBAY_API_KEY:?set BROWSERBAY_API_KEY first, e.g. export BROWSERBAY_API_KEY=$(openssl rand -base64 24)}
+      BROWSERBAY_MAX_CONTEXTS: ${BROWSERBAY_MAX_CONTEXTS:-5}
       # Optional: lets nodes on other machines join (`name:sha256` entries; see the README). Needs the port published
       # beyond this machine, behind HTTPS.
-      BROWSERBOX_ENROLLMENT_SECRETS: ${BROWSERBOX_ENROLLMENT_SECRETS:-}
+      BROWSERBAY_ENROLLMENT_SECRETS: ${BROWSERBAY_ENROLLMENT_SECRETS:-}

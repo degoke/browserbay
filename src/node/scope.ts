@@ -18,9 +18,120 @@
  *   - What a client can ask the machine for is limited (no navigating to file: or chrome:, no file paths into a page, no
  *     downloads). That keeps a browser's pages on the web; it does not make a client harmless. See "Trust" in the README.
  *
- * Plain Node, no dependencies, no sockets: the caller supplies the upstream connection and a transport per client,
- * so the same code is tested against a fake Chromium and run against a real one.
+ * No dependencies and no sockets: the caller supplies the upstream connection and a transport per client, so the same
+ * code is tested against a fake Chromium and run against a real one.
  */
+
+export interface ScopeUpstream {
+  /** Sends one DevTools message (JSON text) to the real browser. */
+  send(text: string): void
+}
+
+export interface ScopeTransport {
+  /** Sends one DevTools message (JSON text) to the client. */
+  send(text: string): void
+  /** Closes the client's connection when the hub ends it (superseded, run ended, browser gone). */
+  close?(code?: number, reason?: string): void
+}
+
+export interface ScopeClient {
+  /** Feed every message the client sends. */
+  handleMessage(text: string): void
+  /** Call when the client's connection closed. Releases what it held; the run's browser context stays. */
+  close(): void
+}
+
+export interface ScopeLogger {
+  warn?(message: string, fields?: Record<string, unknown>): void
+}
+
+export interface CdpScope {
+  /** Takes over the browser: learns what exists, then becomes its only auto-attacher. Call once, before any run. */
+  start(): Promise<void>
+  createRun(runKey: string): Promise<{ contextId: string }>
+  disposeRun(runKey: string): Promise<void>
+  hasRun(runKey: string): boolean
+  runKeys(): string[]
+  connect(runKey: string, transport: ScopeTransport): ScopeClient
+  onUpstreamMessage(text: string): void
+  onUpstreamClosed(): void
+}
+
+/** DevTools parameters and results are open-ended; the hub only looks at the few fields it routes on. */
+type Params = Record<string, any>
+
+interface TargetInfo {
+  targetId: string
+  type: string
+  browserContextId?: string
+  [key: string]: unknown
+}
+
+interface CdpMessage {
+  id?: number
+  method?: string
+  params?: Params
+  result?: Params
+  error?: { code: number; message?: string }
+  sessionId?: string
+}
+
+/** A command from a client: it has an id to answer under and a method. */
+type Command = CdpMessage & { id: number; method: string }
+
+/** Everything the hub knows about one connected client. */
+interface Client {
+  runKey: string
+  contextId: string
+  transport: ScopeTransport
+  /** Targets already handed to this client, so none is announced twice. */
+  delivered: Set<string>
+  /** Window ids Chromium gave this client; window ids are browser-wide, so any other is another run's. */
+  windows: Set<number>
+  discover: boolean
+  closed: boolean
+  send(object: unknown): void
+  sendRaw(text: string): void
+  sendError(id: number, code: number, message: string, sessionId?: string): void
+}
+
+/** A request the hub made for itself: someone in the hub is awaiting the answer. */
+interface HubRequest {
+  resolve(value: Params): void
+  reject(error: Error): void
+}
+
+/** A client's command, sent upstream under a hub-owned id; the answer is routed back under the client's own. */
+interface ForwardedCommand {
+  client: Client
+  clientId: number
+  sessionId?: string
+  /** Rewrites the result before the client sees it. */
+  transform?: (result: Params) => Params
+  /** Runs on a successful result, before it is delivered. */
+  after?: (result: Params) => void
+  /** Runs on a successful result when the client left while the command was in flight. */
+  orphan?: (result: Params) => void
+}
+
+interface ForwardOptions {
+  params?: Params
+  transform?: ForwardedCommand['transform']
+  after?: ForwardedCommand['after']
+  orphan?: ForwardedCommand['orphan']
+}
+
+interface SessionRecord {
+  owner: Client
+  paused: boolean
+  parent?: string
+}
+
+interface Run {
+  contextId: string
+  controller: Client | null
+  clients: Set<Client>
+}
 
 /** Target types a client is handed. Playwright ignores the rest (tabs, devtools, browser). */
 const DELIVERABLE_TYPES = new Set(['page', 'service_worker', 'background_page'])
@@ -64,7 +175,7 @@ const SESSION_DENIED_METHODS = new Set(['DOM.setFileInputFiles', 'Page.setDownlo
  * `about:version` and friends redirect to chrome: pages.
  */
 const NAVIGABLE_SCHEMES = new Set(['http:', 'https:', 'data:', 'blob:'])
-function navigableUrl(value) {
+function navigableUrl(value: unknown): boolean {
   if (typeof value !== 'string') return false
   try {
     const url = new URL(value)
@@ -88,26 +199,35 @@ const ignore = () => undefined
 /** How Chromium starts a reply: `{"id":7,...`. Anything else takes the slower, parsing path. */
 const RESPONSE_HEAD = /^\{"id":(\d+)/
 
-export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_000 }) {
-  const log = (level, message, fields) => logger[level]?.(message, fields)
+export function createCdpScope({
+  upstream,
+  logger = {},
+  requestTimeoutMs = 30_000
+}: {
+  upstream: ScopeUpstream
+  logger?: ScopeLogger
+  /** How long a request to the browser may go unanswered before it fails (default 30 s). */
+  requestTimeoutMs?: number
+}): CdpScope {
+  const log = (level: keyof ScopeLogger, message: string, fields?: Record<string, unknown>) =>
+    logger[level]?.(message, fields)
 
   let nextUpstreamId = 1
-  /** Upstream request id -> who is waiting: the hub itself ({resolve, reject}) or a client's forwarded command. */
-  const pending = new Map()
-  /** runKey -> { contextId, controller, clients } */
-  const runs = new Map()
-  const contextToRun = new Map()
+  /** Upstream request id -> who is waiting: the hub itself or a client's forwarded command. */
+  const pending = new Map<number, HubRequest | ForwardedCommand>()
+  const runs = new Map<string, Run>()
+  const contextToRun = new Map<string, string>()
   /** targetId -> targetInfo, from discovery. Authoritative for "which context does this target belong to". */
-  const targets = new Map()
-  /** sessionId -> { owner: client, paused, parent? }. A session nobody here owns is never forwarded to or from. */
-  const sessions = new Map()
+  const targets = new Map<string, TargetInfo>()
+  /** A session nobody here owns is never forwarded to or from. */
+  const sessions = new Map<string, SessionRecord>()
   let starting = false
   let closed = false
 
-  function request(method, params = {}, sessionId) {
+  function request(method: string, params: Params = {}, sessionId?: string): Promise<Params> {
     if (closed) return Promise.reject(new Error('The browser connection is closed'))
     const id = nextUpstreamId++
-    return new Promise((resolve, reject) => {
+    return new Promise<Params>((resolve, reject) => {
       // A browser that stops answering must not leave callers (a context being created) waiting for ever.
       const timer = setTimeout(() => {
         pending.delete(id)
@@ -129,7 +249,11 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   }
 
   /** Sends a client's command upstream under a hub-owned id, and routes the answer back under the client's own. */
-  function forward(client, message, { params = message.params, transform, after, orphan } = {}) {
+  function forward(
+    client: Client,
+    message: Command,
+    { params = message.params, transform, after, orphan }: ForwardOptions = {}
+  ) {
     const id = nextUpstreamId++
     pending.set(id, { client, clientId: message.id, sessionId: message.sessionId, transform, after, orphan })
     upstream.send(
@@ -143,16 +267,16 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   }
 
   /** Lets a tab that is paused at start run, and lets go of it. Used for every tab no client wants. */
-  function discard(sessionId) {
+  function discard(sessionId: string) {
     request('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(ignore)
     request('Target.detachFromTarget', { sessionId }).catch(ignore)
   }
 
-  function dropSession(sessionId) {
+  function dropSession(sessionId: string) {
     if (!sessions.delete(sessionId)) return
     for (const [id, record] of sessions) if (record.parent === sessionId) dropSession(id)
     for (const [id, entry] of pending) {
-      if (entry.client && entry.sessionId === sessionId) {
+      if ('client' in entry && entry.sessionId === sessionId) {
         pending.delete(id)
         // -32001 is what Chromium answers for a vanished session, and what clients already tolerate.
         entry.client.sendError(entry.clientId, ERR_SESSION_NOT_FOUND, 'Session closed.', sessionId)
@@ -160,33 +284,33 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  const runOf = (contextId) => {
-    const runKey = contextToRun.get(contextId)
+  const runOf = (contextId: string | undefined) => {
+    const runKey = contextId === undefined ? undefined : contextToRun.get(contextId)
     return runKey === undefined ? undefined : runs.get(runKey)
   }
 
   // ---- Chromium -> clients -------------------------------------------------------------------------------------
 
-  function onUpstreamMessage(text) {
+  function onUpstreamMessage(text: string) {
     try {
       // A reply nobody needs to look inside (a screenshot, a large evaluate result) is passed on as it is, with the
       // client's own id in place of the hub's. Parsing and rebuilding it would stall every run on the node.
       const head = RESPONSE_HEAD.exec(text)
       if (head) {
         const entry = pending.get(Number(head[1]))
-        if (entry?.client && !entry.transform && !entry.after && !entry.orphan) {
+        if (entry && 'client' in entry && !entry.transform && !entry.after && !entry.orphan) {
           pending.delete(Number(head[1]))
           entry.client.sendRaw(`{"id":${entry.clientId}${text.slice(head[0].length)}`)
           return
         }
       }
-      let message
+      let message: CdpMessage
       try {
         message = JSON.parse(text)
       } catch {
         return
       }
-      if (typeof message.id === 'number') onResponse(message)
+      if (typeof message.id === 'number') onResponse(message as CdpMessage & { id: number })
       else if (typeof message.method === 'string') onEvent(message, text)
     } catch (error) {
       // One message the hub cannot handle must not become an uncaught exception that ends every run on the node.
@@ -194,11 +318,11 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  function onResponse(message) {
+  function onResponse(message: CdpMessage & { id: number }) {
     const entry = pending.get(message.id)
     if (!entry) return
     pending.delete(message.id)
-    if (entry.resolve) {
+    if ('resolve' in entry) {
       if (message.error)
         entry.reject(Object.assign(new Error(message.error.message ?? 'DevTools error'), message.error))
       else entry.resolve(message.result ?? {})
@@ -226,9 +350,9 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  function onEvent(message, text) {
+  function onEvent(message: CdpMessage, text: string) {
     const { method, params = {} } = message
-    if (message.sessionId) return onSessionEvent(message, text)
+    if (message.sessionId) return onSessionEvent(message as CdpMessage & { sessionId: string }, text)
     switch (method) {
       case 'Target.attachedToTarget':
         return onAttached(params)
@@ -259,7 +383,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  function fanOutDiscovery(contextId, text) {
+  function fanOutDiscovery(contextId: string | undefined, text: string) {
     for (const client of runOf(contextId)?.clients ?? []) if (client.discover) client.sendRaw(text)
   }
 
@@ -268,7 +392,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
    * the run's controller as it is, still paused, or released at once. An unpaused attach is the hub's own explicit
    * attach (answered through its response) or the sweep over existing targets at start-up; neither is acted on here.
    */
-  function onAttached(params) {
+  function onAttached(params: Params) {
     const { sessionId, targetInfo, waitingForDebugger } = params
     if (!sessionId || !targetInfo || targetInfo.type === 'browser') return
     targets.set(targetInfo.targetId, targetInfo)
@@ -291,7 +415,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     controller.send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo, waitingForDebugger: true } })
   }
 
-  function onSessionEvent(message, text) {
+  function onSessionEvent(message: CdpMessage & { sessionId: string }, text: string) {
     const record = sessions.get(message.sessionId)
     if (!record) return
     const { method, params = {} } = message
@@ -309,10 +433,10 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
 
   // ---- clients -> Chromium -------------------------------------------------------------------------------------
 
-  function handleBrowserCommand(client, message) {
+  function handleBrowserCommand(client: Client, message: Command) {
     const { id, method } = message
     const params = message.params ?? {}
-    const ownsTarget = (targetId) => targets.get(targetId)?.browserContextId === client.contextId
+    const ownsTarget = (targetId: string) => targets.get(targetId)?.browserContextId === client.contextId
     const notFound = () => client.sendError(id, ERR_INVALID_PARAMS, 'No target with given id found')
     const withContext = () => {
       if (params.browserContextId !== undefined && params.browserContextId !== client.contextId) {
@@ -348,7 +472,9 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
         return forward(client, message, {
           transform: (result) => ({
             ...result,
-            targetInfos: (result.targetInfos ?? []).filter((info) => info.browserContextId === client.contextId)
+            targetInfos: (result.targetInfos ?? []).filter(
+              (info: TargetInfo) => info.browserContextId === client.contextId
+            )
           })
         })
 
@@ -406,7 +532,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  async function handleSetAutoAttach(client, message) {
+  async function handleSetAutoAttach(client: Client, message: Command) {
     const run = runs.get(client.runKey)
     if (!run) return
     if (!message.params?.autoAttach) {
@@ -420,7 +546,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
       if (info.browserContextId !== run.contextId || !DELIVERABLE_TYPES.has(info.type)) continue
       if (client.delivered.has(info.targetId)) continue
       client.delivered.add(info.targetId)
-      let attached
+      let attached: Params
       try {
         attached = await request('Target.attachToTarget', { targetId: info.targetId, flatten: true })
       } catch {
@@ -445,7 +571,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     client.send({ id: message.id, result: {} })
   }
 
-  function handleSessionCommand(client, message) {
+  function handleSessionCommand(client: Client, message: Command & { sessionId: string }) {
     const { id, method, sessionId } = message
     const params = message.params ?? {}
     const record = sessions.get(sessionId)
@@ -505,14 +631,16 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   // ---- clients -----------------------------------------------------------------------------------------------
 
   /** Lets go of everything a client held. The run's context and pages stay: the next client sees them as they are. */
-  function release(client) {
+  function release(client: Client) {
     if (client.closed) return
     client.closed = true
     const run = runs.get(client.runKey)
     run?.clients.delete(client)
     if (run?.controller === client) run.controller = null
     // What an in-flight command was creating is still let go of when its answer arrives (see onResponse).
-    for (const [id, entry] of pending) if (entry.client === client && !entry.orphan) pending.delete(id)
+    for (const [id, entry] of pending) {
+      if ('client' in entry && entry.client === client && !entry.orphan) pending.delete(id)
+    }
     // Children before parents. A paused tab must be resumed before it is let go, or it stays frozen; a session that
     // enabled request interception must be detached, or the tab's requests wait for an answer nobody will give.
     const owned = [...sessions].filter(([, record]) => record.owner === client).reverse()
@@ -525,20 +653,19 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  function evict(client, code, reason) {
+  function evict(client: Client, code: number, reason: string) {
     release(client)
     client.transport.close?.(code, reason)
   }
 
-  function connect(runKey, transport) {
+  function connect(runKey: string, transport: ScopeTransport): ScopeClient {
     const run = runs.get(runKey)
     if (!run) throw new Error('Unknown slot')
-    const client = {
+    const client: Client = {
       runKey,
       contextId: run.contextId,
       transport,
       delivered: new Set(),
-      /** Window ids Chromium gave this client; window ids are browser-wide, so any other is another run's. */
       windows: new Set(),
       discover: false,
       closed: false,
@@ -556,16 +683,17 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     return {
       handleMessage(text) {
         if (client.closed) return
-        let message
+        let message: CdpMessage
         try {
           message = JSON.parse(text)
         } catch {
           return
         }
         if (typeof message?.id !== 'number' || typeof message.method !== 'string') return
+        const command = message as Command
         try {
-          if (message.sessionId !== undefined) handleSessionCommand(client, message)
-          else handleBrowserCommand(client, message)
+          if (command.sessionId !== undefined) handleSessionCommand(client, command as Command & { sessionId: string })
+          else handleBrowserCommand(client, command)
         } catch (error) {
           log('warn', 'A scoped command failed', { method: message.method, error: String(error) })
           client.sendError(message.id, ERR_INTERNAL, 'The command could not be completed', message.sessionId)
@@ -579,7 +707,6 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
 
   // ---- lifecycle ---------------------------------------------------------------------------------------------
 
-  /** Takes over the browser: learns what exists, then becomes its only auto-attacher. Call once, before any run. */
   async function start() {
     starting = true
     try {
@@ -593,9 +720,9 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   }
 
   /** Keys whose context is still being made: reserved at once, so two creates for one key cannot both pass the check. */
-  const creating = new Set()
+  const creating = new Set<string>()
 
-  async function createRun(runKey) {
+  async function createRun(runKey: string) {
     if (runs.has(runKey) || creating.has(runKey)) throw new Error('This slot already has a browser context')
     creating.add(runKey)
     try {
@@ -605,7 +732,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     }
   }
 
-  async function makeRun(runKey) {
+  async function makeRun(runKey: string) {
     // disposeOnDetach:false, so a client disconnecting (a service handing the browser to a person) leaves the context alone.
     const { browserContextId } = await request('Target.createBrowserContext', { disposeOnDetach: false })
     // Files would land on this machine, outside any run's control. Denied from the start, not only if a client asks.
@@ -620,7 +747,7 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
     return { contextId: browserContextId }
   }
 
-  async function disposeRun(runKey) {
+  async function disposeRun(runKey: string) {
     const run = runs.get(runKey)
     if (!run) return
     runs.delete(runKey)
@@ -634,7 +761,9 @@ export function createCdpScope({ upstream, logger = {}, requestTimeoutMs = 30_00
   function onUpstreamClosed() {
     if (closed) return
     closed = true
-    for (const entry of pending.values()) entry.reject?.(new Error('The browser connection closed'))
+    for (const entry of pending.values()) {
+      if ('reject' in entry) entry.reject(new Error('The browser connection closed'))
+    }
     pending.clear()
     for (const run of runs.values()) for (const client of [...run.clients]) evict(client, 1011, 'The browser closed')
     runs.clear()

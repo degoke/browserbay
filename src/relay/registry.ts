@@ -22,7 +22,7 @@ export class AllocationAbortedError extends Error {
   }
 }
 
-interface NodeState {
+export interface NodeState {
   id: string
   maxContexts: number
   draining: boolean
@@ -34,7 +34,7 @@ interface NodeState {
   reserved: number
 }
 
-interface SlotState {
+export interface SlotState {
   slotId: string
   runId: string
   nodeId: string

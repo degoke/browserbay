@@ -1,43 +1,44 @@
 {
-  "name": "browserbox",
-  "private": true,
+  "name": "@degoke/browserbay",
   "version": "0.1.0",
   "description": "Self-hosted browsers for AI agents and automation: a relay, browser nodes that dial out to it, and a client. Deploy it anywhere, point any project at it.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/degoke/browserbay.git"
+  },
   "type": "module",
   "packageManager": "pnpm@10.13.1",
   "engines": {
     "node": ">=22"
   },
   "bin": {
-    "browserbox": "./bin/browserbox.mjs"
+    "browserbay": "./dist/cli.js"
   },
   "exports": {
     "./client": {
-      "types": "./src/client/index.d.ts",
-      "default": "./src/client/index.js"
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
     },
     "./protocol": {
-      "types": "./src/protocol.d.ts",
-      "default": "./src/protocol.js"
+      "types": "./dist/protocol.d.ts",
+      "default": "./dist/protocol.js"
     },
     "./package.json": "./package.json"
   },
   "files": [
-    "bin",
-    "src",
-    "!src/**/*.test.*",
-    "!src/node/fake-chromium.*"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-protocol.mjs",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm build && node --import tsx --test \"src/**/*.test.ts\" \"src/**/*.test.mjs\"",
+    "test": "pnpm build && node --import tsx --test \"src/**/*.test.ts\"",
     "test:browser": "pnpm build && PLAYWRIGHT_BROWSER_TESTS=1 node --import tsx --test --test-concurrency=1 \"test/**/*.browser.test.ts\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "ci": "pnpm typecheck && pnpm format:check && pnpm test",
-    "start": "node bin/browserbox.mjs start",
-    "docker:build": "docker build -t browserbox ."
+    "start": "node dist/cli.js start",
+    "docker:build": "docker build -t browserbay ."
   },
   "dependencies": {
     "ws": "^8.22.0",
@@ -50,5 +51,8 @@
     "prettier": "^3.5.3",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }

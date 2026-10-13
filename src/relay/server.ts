@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
-import { createBacklogGuard } from './backlog-guard.js'
+import { createBacklogGuard } from '../backlog-guard.js'
 import {
   AllocationAbortedError,
   createNodeRegistry,

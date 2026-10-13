@@ -570,11 +570,11 @@ test('relay settings: enrollment secrets are name:sha256 pairs, and the API key 
   for (const bad of ['', 'nohash', 'name:short', `:${hash}`, `bad name:${hash}`]) {
     assert.throws(() => parseEnrollmentSecrets(bad), bad)
   }
-  const config = parseRelayConfig({ BROWSERBOX_API_KEY: API_KEY, BROWSERBOX_ENROLLMENT_SECRETS: `a:${hash}` })
+  const config = parseRelayConfig({ BROWSERBAY_API_KEY: API_KEY, BROWSERBAY_ENROLLMENT_SECRETS: `a:${hash}` })
   assert.equal(config.port, 8788)
   assert.equal(config.maxAcquireWaitMs, 60_000)
-  assert.throws(() => parseRelayConfig({ BROWSERBOX_ENROLLMENT_SECRETS: `a:${hash}` }), /Invalid relay configuration/)
-  assert.throws(() => parseRelayConfig({ BROWSERBOX_API_KEY: 'short', BROWSERBOX_ENROLLMENT_SECRETS: `a:${hash}` }))
+  assert.throws(() => parseRelayConfig({ BROWSERBAY_ENROLLMENT_SECRETS: `a:${hash}` }), /Invalid relay configuration/)
+  assert.throws(() => parseRelayConfig({ BROWSERBAY_API_KEY: 'short', BROWSERBAY_ENROLLMENT_SECRETS: `a:${hash}` }))
 })
 
 /** Sends raw bytes to the relay and returns whatever comes back: for requests no HTTP client would ever produce. */
@@ -676,25 +676,25 @@ test('a caller that hangs up while waiting for capacity is not given a slot afte
 
 test('box settings: remote nodes are optional, the API key is not, and the relay’s other settings carry over', () => {
   const hash = hashToken('some-secret')
-  const alone = parseBoxConfig({ BROWSERBOX_API_KEY: API_KEY })
+  const alone = parseBoxConfig({ BROWSERBAY_API_KEY: API_KEY })
   assert.deepEqual(alone.remoteEnrollmentSecrets, [], 'a box has its own node')
   assert.equal(alone.port, 8788)
   assert.equal(alone.maxAcquireWaitMs, 60_000)
 
   const withRemote = parseBoxConfig({
-    BROWSERBOX_API_KEY: API_KEY,
-    BROWSERBOX_ENROLLMENT_SECRETS: `edge:${hash}`,
+    BROWSERBAY_API_KEY: API_KEY,
+    BROWSERBAY_ENROLLMENT_SECRETS: `edge:${hash}`,
     PORT: '9000',
-    BROWSERBOX_MAX_ACQUIRE_WAIT_MS: '5000'
+    BROWSERBAY_MAX_ACQUIRE_WAIT_MS: '5000'
   })
   assert.deepEqual(withRemote.remoteEnrollmentSecrets, [{ id: 'edge', sha256: hash }])
   assert.equal(withRemote.port, 9000)
   assert.equal(withRemote.maxAcquireWaitMs, 5000)
 
   assert.throws(() => parseBoxConfig({}), /Invalid configuration/)
-  assert.throws(() => parseBoxConfig({ BROWSERBOX_API_KEY: 'short' }), /Invalid configuration/)
+  assert.throws(() => parseBoxConfig({ BROWSERBAY_API_KEY: 'short' }), /Invalid configuration/)
   assert.throws(
-    () => parseBoxConfig({ BROWSERBOX_API_KEY: API_KEY, BROWSERBOX_ENROLLMENT_SECRETS: 'not-a-pair' }),
+    () => parseBoxConfig({ BROWSERBAY_API_KEY: API_KEY, BROWSERBAY_ENROLLMENT_SECRETS: 'not-a-pair' }),
     /name:sha256hex/
   )
   // A stand-alone relay, unlike a box, still needs at least one node allowed to join.

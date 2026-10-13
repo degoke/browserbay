@@ -3,7 +3,7 @@
  * of it, and the agent that dials the relay. Everything here is outbound.
  *
  * `startBrowserNode` does no process-level work (no signal handlers, no `process.exit`), so the node can run as its own
- * process (main.mjs) or inside the all-in-one `browserbox start` (box/start.mjs).
+ * process (main.ts) or inside the all-in-one `browserbay start` (box/start.ts).
  *
  * The node is over when Chromium is: every context died with it, so `exited` resolves and the caller is expected to
  * leave, and the platform's restart policy brings back a node that registers again with no contexts. The relay then
@@ -13,11 +13,13 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable, Writable } from 'node:stream'
+import { errorMessage } from '../errors.js'
 import { ConfigError } from '../protocol.js'
-import { assertSecureRelayUrl, startAgent } from './agent.mjs'
-import { chromiumArgs, chromiumEnv, findChromium } from './chromium.mjs'
-import { createPipeUpstream } from './pipe-upstream.mjs'
-import { createCdpScope } from './scope.mjs'
+import { assertSecureRelayUrl, startAgent, type Agent, type AgentLogger } from './agent.js'
+import { chromiumArgs, chromiumEnv, findChromium } from './chromium.js'
+import { createPipeUpstream } from './pipe-upstream.js'
+import { createCdpScope } from './scope.js'
 
 export { ConfigError }
 
@@ -25,33 +27,49 @@ const CHROMIUM_START_TIMEOUT_MS = 30_000
 const CHROMIUM_STOP_GRACE_MS = 3000
 const CONNECT_REPORT_MS = 15_000
 
-/**
- * @param {object} options
- * @param {string} options.relayUrl
- * @param {string} options.enrollmentSecret
- * @param {string} options.nodeId
- * @param {number} [options.maxContexts]
- * @param {string} [options.profileDir] Chromium's profile. A fresh temporary directory (removed on exit) when omitted.
- * @param {boolean} [options.headless]
- * @param {boolean} [options.sandbox] Keep Chromium's own sandbox on (needs user namespaces).
- * @param {string} [options.executable] Defaults to the Chromium in the image (or BROWSERBOX_CHROMIUM_EXECUTABLE).
- * @param {{ info?: Function, warn?: Function }} [options.logger]
- * @returns {Promise<{ exited: Promise<{ reason: string, crashed: boolean }>, drain(ms?: number): Promise<void>, close(reason?: string): Promise<void> }>}
- */
-export async function startBrowserNode(options) {
+export interface BrowserNodeOptions {
+  relayUrl: string
+  enrollmentSecret: string
+  nodeId: string
+  maxContexts?: number
+  /** Chromium's profile. A fresh temporary directory (removed on exit) when omitted. */
+  profileDir?: string
+  headless?: boolean
+  /** Keep Chromium's own sandbox on (needs user namespaces). */
+  sandbox?: boolean
+  /** Defaults to the Chromium in the image (or BROWSERBAY_CHROMIUM_EXECUTABLE). */
+  executable?: string
+  logger?: AgentLogger
+}
+
+export interface NodeExit {
+  reason: string
+  /** Chromium died (or could not start), as opposed to the node being told to stop. */
+  crashed: boolean
+}
+
+export interface BrowserNode {
+  /** Resolves when the node is over: every context died with Chromium, so the caller is expected to leave. */
+  exited: Promise<NodeExit>
+  /** Stops taking slots, gives the current ones up to `ms` to finish, then stops. */
+  drain(ms?: number): Promise<void>
+  close(reason?: string): Promise<void>
+}
+
+export async function startBrowserNode(options: BrowserNodeOptions): Promise<BrowserNode> {
   const { relayUrl, enrollmentSecret, nodeId, maxContexts = 5, headless = true, sandbox = false, logger = {} } = options
   const executable = options.executable ?? findChromium()
   if (!executable) {
-    throw new ConfigError('Chromium was not found. Use the browserbox image, or set BROWSERBOX_CHROMIUM_EXECUTABLE.')
+    throw new ConfigError('Chromium was not found. Use the browserbay image, or set BROWSERBAY_CHROMIUM_EXECUTABLE.')
   }
   try {
     assertSecureRelayUrl(relayUrl)
   } catch (error) {
-    throw new ConfigError(`The relay URL is not usable: ${error.message}`)
+    throw new ConfigError(`The relay URL is not usable: ${errorMessage(error)}`)
   }
 
   const ownsProfile = !options.profileDir
-  const profileDir = options.profileDir ?? (await mkdtemp(join(tmpdir(), 'browserbox-profile-')))
+  const profileDir = options.profileDir ?? (await mkdtemp(join(tmpdir(), 'browserbay-profile-')))
 
   // DevTools over a pipe (fds 3 and 4): no port, and no size limit on what a screenshot or an evaluate result may be.
   const chromium = spawn(executable, chromiumArgs({ profileDir, headless, sandbox }), {
@@ -60,14 +78,14 @@ export async function startBrowserNode(options) {
     env: chromiumEnv()
   })
 
-  let agent
+  let agent: Agent | undefined
   let stopping = false
-  let finish
-  const exited = new Promise((resolve) => {
+  let finish: (exit: NodeExit) => void = () => undefined
+  const exited = new Promise<NodeExit>((resolve) => {
     finish = resolve
   })
 
-  function stop(reason, crashed) {
+  function stop(reason: string, crashed: boolean) {
     if (stopping) return exited
     stopping = true
     logger.info?.(`node stopping: ${reason}`)
@@ -91,8 +109,8 @@ export async function startBrowserNode(options) {
 
   try {
     const pipe = createPipeUpstream({
-      input: chromium.stdio[4],
-      output: chromium.stdio[3],
+      input: chromium.stdio[4] as Readable,
+      output: chromium.stdio[3] as Writable,
       onMessage: (text) => scope.onUpstreamMessage(text),
       onClose: () => {
         scope.onUpstreamClosed()
@@ -102,7 +120,7 @@ export async function startBrowserNode(options) {
     const scope = createCdpScope({ upstream: { send: (text) => pipe.send(text) }, logger })
     await Promise.race([
       scope.start(),
-      new Promise((_, reject) =>
+      new Promise<never>((_, reject) =>
         setTimeout(
           () => reject(new Error('Chromium did not answer on its DevTools pipe')),
           CHROMIUM_START_TIMEOUT_MS
@@ -111,7 +129,7 @@ export async function startBrowserNode(options) {
     ])
     agent = startAgent({ relayUrl, enrollmentSecret, nodeId, scope, maxContexts, logger })
   } catch (error) {
-    await stop(error.message, true)
+    await stop(errorMessage(error), true)
     throw error
   }
 
@@ -129,7 +147,6 @@ export async function startBrowserNode(options) {
 
   return {
     exited,
-    /** Stops taking slots, gives the current ones up to `ms` to finish, then stops. */
     async drain(ms = 120_000) {
       logger.info?.(`node draining for up to ${Math.round(ms / 1000)}s`)
       await agent?.drain(ms)

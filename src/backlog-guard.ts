@@ -4,7 +4,7 @@
  * the very next message would then look like an overload. A consumer is too slow when its backlog stays above
  * `maxBytes` for longer than `graceMs`. Call the returned function with the socket's bufferedAmount before each send.
  *
- * src/node/agent.mjs has the same logic for the node side (plain JavaScript, so it cannot import this).
+ * Shared by the relay (its client sockets) and the node agent (its stream sockets).
  */
 export function createBacklogGuard({
   maxBytes,

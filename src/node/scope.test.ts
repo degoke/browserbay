@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createFakeChromium } from './fake-chromium.mjs'
-import { createCdpScope } from './scope.mjs'
+import { createFakeChromium, type FakeChromium } from './fake-chromium.js'
+import { createCdpScope, type CdpScope } from './scope.js'
 
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }
+
+/** A message from the hub to a client: an answer or an event, whose shape each test looks into. */
+type Message = Record<string, any>
+type World = Awaited<ReturnType<typeof setup>>
 
 /** A hub in front of a fake Chromium that already has its own default-context page, as a real one does. */
 async function setup() {
   const fake = createFakeChromium()
   const defaultPage = fake.createTarget({ url: 'about:blank' })
-  const warnings = []
+  const warnings: string[] = []
   const scope = createCdpScope({
     upstream: { send: fake.receive },
     logger: { warn: (message) => warnings.push(message) }
@@ -21,9 +25,9 @@ async function setup() {
 }
 
 /** A client of one run. `call` sends a command and returns its answer once everything it set off has settled. */
-function connect(scope, fake, runKey) {
-  const inbox = []
-  const closes = []
+function connect(scope: CdpScope, fake: FakeChromium, runKey: string) {
+  const inbox: Message[] = []
+  const closes: { code?: number; reason?: string }[] = []
   const client = scope.connect(runKey, {
     send: (text) => inbox.push(JSON.parse(text)),
     close: (code, reason) => closes.push({ code, reason })
@@ -33,7 +37,7 @@ function connect(scope, fake, runKey) {
     client,
     inbox,
     closes,
-    async call(method, params = {}, sessionId) {
+    async call(method: string, params: Record<string, any> = {}, sessionId?: string) {
       const id = nextId++
       client.handleMessage(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
       await fake.flush()
@@ -41,13 +45,13 @@ function connect(scope, fake, runKey) {
       assert.ok(answer, `${method} was answered`)
       return answer
     },
-    events: (method) => inbox.filter((message) => message.method === method),
+    events: (method: string) => inbox.filter((message) => message.method === method),
     attachedSessions: () => inbox.filter((m) => m.method === 'Target.attachedToTarget').map((m) => m.params.sessionId)
   }
 }
 
 /** A run with a connected client that has asked to be attached to everything in its context. */
-async function controller(world, runKey) {
+async function controller(world: World, runKey: string) {
   const { contextId } = await world.scope.createRun(runKey)
   const client = connect(world.scope, world.fake, runKey)
   return { contextId, client, attach: () => client.call('Target.setAutoAttach', AUTO_ATTACH) }
@@ -62,7 +66,7 @@ test('start takes over auto-attach and lets go of the browser’s own default-co
 test('a run’s context is created so it outlives the client that connected to it', async () => {
   const { fake, scope } = await setup()
   await scope.createRun('a')
-  assert.equal(fake.commands('Target.createBrowserContext')[0].params.disposeOnDetach, false)
+  assert.equal(fake.commands('Target.createBrowserContext')[0]?.params?.disposeOnDetach, false)
   await assert.rejects(scope.createRun('a'))
 })
 
@@ -97,10 +101,11 @@ test('a new tab is created in the run’s context, announced paused before the a
 
   const created = await a.client.call('Target.createTarget', { url: 'about:blank' })
   const { targetId } = created.result
-  assert.equal(world.fake.targets.get(targetId).browserContextId, a.contextId, 'the context was filled in')
+  assert.equal(world.fake.targets.get(targetId)?.browserContextId, a.contextId, 'the context was filled in')
   const announced = a.client
     .events('Target.attachedToTarget')
     .find((event) => event.params.targetInfo.targetId === targetId)
+  assert.ok(announced, 'the new tab was announced')
   assert.equal(announced.params.waitingForDebugger, true)
   assert.ok(a.client.inbox.indexOf(announced) < a.client.inbox.indexOf(created), 'announced before the answer')
   assert.equal(world.fake.isPaused(targetId), true, 'still paused: the client is not done setting it up')
@@ -134,7 +139,7 @@ test('one run never receives another’s tabs, targets or session events', async
   assert.equal(a.client.attachedSessions().length, 1)
   assert.equal(b.client.attachedSessions().length, 1)
   const listed = (await a.client.call('Target.getTargets')).result.targetInfos
-  assert.ok(listed.length === 1 && listed.every((info) => info.browserContextId === a.contextId))
+  assert.ok(listed.length === 1 && listed.every((info: Message) => info.browserContextId === a.contextId))
   assert.deepEqual((await a.client.call('Target.getBrowserContexts')).result, { browserContextIds: [a.contextId] })
 
   world.fake.emitSessionEvent(a.client.attachedSessions()[0], 'Page.screencastFrame', { data: 'frame' })
@@ -153,7 +158,7 @@ test('commands with no context act on the run’s own, not the browser’s defau
   assert.deepEqual((await b.client.call('Storage.getCookies')).result.cookies, [])
   assert.equal((await a.client.call('Storage.getCookies')).result.cookies.length, 1)
   await a.client.call('Browser.grantPermissions', { permissions: ['geolocation'] })
-  assert.equal(world.fake.commands('Browser.grantPermissions')[0].params.browserContextId, a.contextId)
+  assert.equal(world.fake.commands('Browser.grantPermissions')[0]?.params?.browserContextId, a.contextId)
 })
 
 test('downloads are denied for the run’s context, and a client cannot choose where files would go', async () => {
@@ -176,7 +181,10 @@ test('two creates for the same slot at once make one context, not two with one o
   const { fake, scope } = await setup()
   const results = await Promise.allSettled([scope.createRun('same'), scope.createRun('same')])
   assert.deepEqual(results.map((result) => result.status).sort(), ['fulfilled', 'rejected'])
-  assert.match(String(results.find((result) => result.status === 'rejected').reason), /already has a browser context/)
+  assert.match(
+    String((results.find((result) => result.status === 'rejected') as PromiseRejectedResult).reason),
+    /already has a browser context/
+  )
   assert.equal(fake.commands('Target.createBrowserContext').length, 1, 'only one context was made, so none leaks')
 
   // The slot can still be released and made again afterwards.
@@ -195,7 +203,7 @@ test('a run’s context is denied downloads from the start, without its client h
 })
 
 /** A run with a page of its own and a session on it, as a client that attached to the tab has. */
-async function pageSession(world, runKey) {
+async function pageSession(world: World, runKey: string) {
   const run = await controller(world, runKey)
   const targetId = world.fake.createTarget({ browserContextId: run.contextId, url: 'https://a/' })
   await world.fake.flush()
@@ -263,7 +271,8 @@ test('a new tab cannot be opened on a refused URL either, and the default tab is
 test('a paused request can be rewritten to another web address, not to a file', async () => {
   const world = await setup()
   const a = await pageSession(world, 'a')
-  const pass = (params) => a.client.call('Fetch.continueRequest', { requestId: 'r', ...params }, a.sessionId)
+  const pass = (params: Record<string, any>) =>
+    a.client.call('Fetch.continueRequest', { requestId: 'r', ...params }, a.sessionId)
 
   assert.equal((await pass({})).error, undefined, 'continuing as it is')
   assert.equal((await pass({ url: 'https://example.com/other' })).error, undefined)
@@ -275,7 +284,7 @@ test('a paused request can be rewritten to another web address, not to a file', 
 test('a client cannot have the browser read a file path for it, or choose where a download goes', async () => {
   const world = await setup()
   const a = await pageSession(world, 'a')
-  const refused = async (method, params) => {
+  const refused = async (method: string, params: Record<string, any>) => {
     const answer = await a.client.call(method, params, a.sessionId)
     assert.equal(answer.error?.code, -32601, method)
     assert.match(answer.error.message, /not available on a shared browser/)
@@ -304,7 +313,7 @@ test('Target.createTarget passes only what a page needs, and only into the run�
   const a = await controller(world, 'a')
   const b = await controller(world, 'b')
   await a.client.call('Target.createTarget', { url: 'https://a/', enableBeginFrameControl: true, forTab: true })
-  assert.deepEqual(world.fake.commands('Target.createTarget').at(-1).params, {
+  assert.deepEqual(world.fake.commands('Target.createTarget').at(-1)?.params, {
     url: 'https://a/',
     browserContextId: a.contextId
   })
@@ -323,7 +332,7 @@ test('another run’s browser cannot be reached, and says nothing about what exi
   await a.attach()
   const mine = (await a.client.call('Target.createTarget', { url: 'about:blank' })).result.targetId
 
-  const message = async (method, params, sessionId) => {
+  const message = async (method: string, params: Record<string, any>, sessionId?: string) => {
     const answer = await a.client.call(method, params, sessionId)
     assert.ok(answer.error, `${method} was refused`)
     return answer.error.message
@@ -339,12 +348,13 @@ test('another run’s browser cannot be reached, and says nothing about what exi
   }
   assert.ok(world.fake.targets.has(theirs), 'their tab is still open')
 
-  for (const [method, params] of [
+  const withTheirContext: [string, Record<string, any>][] = [
     ['Storage.getCookies', { browserContextId: b.contextId }],
     ['Storage.clearCookies', { browserContextId: b.contextId }],
     ['Browser.grantPermissions', { permissions: [], browserContextId: b.contextId }],
     ['Browser.resetPermissions', { browserContextId: b.contextId }]
-  ]) {
+  ]
+  for (const [method, params] of withTheirContext) {
     await message(method, params)
   }
   for (const method of ['Browser.close', 'Browser.crash', 'SystemInfo.getInfo', 'Target.attachToBrowserTarget']) {
@@ -450,15 +460,16 @@ test('a popup is handed over paused when a client is attached, and released when
   await fake.flush()
   await a.attach()
   const opener = a.client.attachedSessions()[0]
-  const openerTarget = fake.sessions.get(opener).targetId
+  const openerTarget = fake.sessions.get(opener)?.targetId
 
   const popup = fake.openPopup(opener)
   await fake.flush()
   const announced = a.client
     .events('Target.attachedToTarget')
     .find((event) => event.params.targetInfo.targetId === popup)
+  assert.ok(announced, 'the popup was announced')
   assert.equal(announced.params.waitingForDebugger, true)
-  assert.equal(announced.params.targetInfo.openerId, fake.sessions.get(opener).targetId)
+  assert.equal(announced.params.targetInfo.openerId, fake.sessions.get(opener)?.targetId)
   assert.equal(fake.isPaused(popup), true, 'held until the client has armed its routing')
 
   a.client.client.close()
@@ -506,6 +517,7 @@ test('frames and workers attached under a client’s page belong to that client 
   const frame = fake.addChildSession(page)
   await fake.flush()
   const announced = a.client.inbox.find((m) => m.method === 'Target.attachedToTarget' && m.params.sessionId === frame)
+  assert.ok(announced, 'the frame was announced')
   assert.equal(announced.sessionId, page, 'announced on the parent session, as Chromium does')
   assert.equal(
     b.client.inbox.some((m) => m.params?.sessionId === frame),
@@ -645,7 +657,7 @@ test('a session created for a client that left in the meantime is let go', async
 test('a reply is passed on untouched apart from its id, without being parsed again', async () => {
   const world = await setup()
   await world.scope.createRun('a')
-  const raw = []
+  const raw: string[] = []
   const client = world.scope.connect('a', { send: (text) => raw.push(text) })
   client.handleMessage(JSON.stringify({ id: 7, method: 'Browser.getVersion' }))
 

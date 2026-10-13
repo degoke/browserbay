@@ -52,15 +52,15 @@ jobs:
           context: .
           target: relay
           load: true
-          tags: browserbox-relay:ci
+          tags: browserbay-relay:ci
           cache-from: type=gha,scope=relay
           cache-to: type=gha,mode=max,scope=relay
       - name: The relay image starts and answers
         run: |
           docker run -d --name relay -p 8788:8788 \
-            -e BROWSERBOX_API_KEY=ci-api-key-0123456789 \
-            -e BROWSERBOX_ENROLLMENT_SECRETS=ci:0000000000000000000000000000000000000000000000000000000000000000 \
-            browserbox-relay:ci
+            -e BROWSERBAY_API_KEY=ci-api-key-0123456789 \
+            -e BROWSERBAY_ENROLLMENT_SECRETS=ci:0000000000000000000000000000000000000000000000000000000000000000 \
+            browserbay-relay:ci
           for i in $(seq 1 20); do curl -fs http://localhost:8788/health && exit 0; sleep 1; done
           docker logs relay
           exit 1
@@ -68,6 +68,6 @@ jobs:
         with:
           context: .
           target: box
-          tags: browserbox:ci
+          tags: browserbay:ci
           cache-from: type=gha,scope=box
           cache-to: type=gha,mode=max,scope=box

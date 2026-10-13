@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
-import { createPipeUpstream } from './pipe-upstream.mjs'
+import { createPipeUpstream } from './pipe-upstream.js'
 
 function setup() {
   const input = new PassThrough()
   const output = new PassThrough()
-  const messages = []
+  const messages: string[] = []
   let closes = 0
   const upstream = createPipeUpstream({
     input,
@@ -14,7 +14,7 @@ function setup() {
     onMessage: (text) => messages.push(text),
     onClose: () => closes++
   })
-  const written = []
+  const written: string[] = []
   output.on('data', (chunk) => written.push(chunk.toString('utf8')))
   return { input, output, upstream, messages, written, closes: () => closes }
 }

@@ -1,6 +1,6 @@
 /**
- * Real-browser check of the whole box: node processes (`browserbox node`, with Node's built-in WebSocket client and real
- * Chromium), the relay, and the client a service uses. Then the all-in-one `browserbox start`, which needs `pnpm build`.
+ * Real-browser check of the whole box: node processes (`browserbay node`, with Node's built-in WebSocket client and real
+ * Chromium), the relay, and the client a service uses. Then the all-in-one `browserbay start`, which needs `pnpm build`.
  * Skipped unless PLAYWRIGHT_BROWSER_TESTS=1 (CI has no Chromium). Run with: pnpm test:browser
  */
 import assert from 'node:assert/strict'
@@ -14,14 +14,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
-import { createBrowserBox, NoCapacityError, type Slot } from '../src/client/index.js'
+import { createBrowserBay, NoCapacityError, type Slot } from '../src/client/index.js'
 import { hashToken } from '../src/relay/registry.js'
 import { createRelayServer } from '../src/relay/server.js'
 import { connect, enabled, removeProfile, serve, until, watch, watchDriveReattach } from './support.js'
 
 const API_KEY = 'box-test-api-key-0123456789'
 const SECRET = 'box-test-enrollment-secret'
-const CLI = fileURLToPath(new URL('../bin/browserbox.mjs', import.meta.url))
+const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
 
 /** A process of the CLI, with its stderr kept for when a test fails. */
 function run(args: string[], env: Record<string, string>) {
@@ -50,17 +50,17 @@ function run(args: string[], env: Record<string, string>) {
   }
 }
 
-/** A node: `browserbox node` as a process, with the real Chromium, exactly as the image would run it. */
+/** A node: `browserbay node` as a process, with the real Chromium, exactly as the image would run it. */
 async function startNode(relayUrl: string, executable: string, nodeId = 'node-1', secret = SECRET) {
-  const profileDir = await mkdtemp(join(tmpdir(), 'browserbox-node-'))
+  const profileDir = await mkdtemp(join(tmpdir(), 'browserbay-node-'))
   const node = run(['node'], {
-    BROWSERBOX_RELAY_URL: relayUrl,
-    BROWSERBOX_ENROLLMENT_SECRET: secret,
-    BROWSERBOX_NODE_ID: nodeId,
-    BROWSERBOX_MAX_CONTEXTS: '3',
-    BROWSERBOX_DRAIN_SECONDS: '1',
-    BROWSERBOX_CHROMIUM_EXECUTABLE: executable,
-    BROWSERBOX_PROFILE_DIR: profileDir
+    BROWSERBAY_RELAY_URL: relayUrl,
+    BROWSERBAY_ENROLLMENT_SECRET: secret,
+    BROWSERBAY_NODE_ID: nodeId,
+    BROWSERBAY_MAX_CONTEXTS: '3',
+    BROWSERBAY_DRAIN_SECONDS: '1',
+    BROWSERBAY_CHROMIUM_EXECUTABLE: executable,
+    BROWSERBAY_PROFILE_DIR: profileDir
   })
   return {
     ...node,
@@ -80,7 +80,7 @@ async function startBox({ acquireWaitMs = 5000 }: { acquireWaitMs?: number } = {
     apiKey: API_KEY,
     enrollmentSecrets: [{ id: 'test', sha256: hashToken(SECRET) }],
     nodeTimeoutMs: 60_000,
-    ...(process.env.BROWSERBOX_TEST_SHOW_NODE_LOGS ? { logger: { info: console.log, warn: console.log } } : {})
+    ...(process.env.BROWSERBAY_TEST_SHOW_NODE_LOGS ? { logger: { info: console.log, warn: console.log } } : {})
   })
   const port = await relay.listen(0, '127.0.0.1')
   const base = `http://127.0.0.1:${port}`
@@ -91,7 +91,7 @@ async function startBox({ acquireWaitMs = 5000 }: { acquireWaitMs?: number } = {
     await until(() => relay.registry.listNodes().some((entry) => entry.nodeId === nodeId), `${nodeId} to join`, 60_000)
     return node
   }
-  const box = createBrowserBox({ url: base, apiKey: API_KEY })
+  const box = createBrowserBay({ url: base, apiKey: API_KEY })
   const acquire = (runId: string) => box.acquire({ runId, maxLifetimeSeconds: 600, waitMs: acquireWaitMs })
   return {
     relay,
@@ -102,8 +102,8 @@ async function startBox({ acquireWaitMs = 5000 }: { acquireWaitMs?: number } = {
     async close() {
       for (const node of nodes) {
         await node.stop()
-        // BROWSERBOX_TEST_SHOW_NODE_LOGS=1 shows what each node process said, for when a test fails.
-        if (process.env.BROWSERBOX_TEST_SHOW_NODE_LOGS) console.log(`--- ${node.profileDir}\n${node.stderr.join('')}`)
+        // BROWSERBAY_TEST_SHOW_NODE_LOGS=1 shows what each node process said, for when a test fails.
+        if (process.env.BROWSERBAY_TEST_SHOW_NODE_LOGS) console.log(`--- ${node.profileDir}\n${node.stderr.join('')}`)
       }
       await relay.close()
     }
@@ -148,7 +148,7 @@ test('slots on one node are kept apart, and large results cross the whole path',
     assert.equal((await b.page.evaluate(() => 'y'.repeat(20_000_000))).length, 20_000_000)
 
     // One slot's token opens that slot and nothing else.
-    const wrongToken = { ...slotA.headers, 'x-browserbox-token': slotB.token }
+    const wrongToken = { ...slotA.headers, 'x-browserbay-token': slotB.token }
     await assert.rejects(connect(slotA.cdpUrl, { headers: wrongToken }))
 
     await a.detach()
@@ -248,25 +248,25 @@ test(
 )
 
 test(
-  'browserbox start: relay and node in one process, with remote nodes able to join it',
+  'browserbay start: relay and node in one process, with remote nodes able to join it',
   { skip: !enabled },
   async () => {
     const executable = chromium.executablePath()
     const port = await freePort()
     const remoteSecret = randomBytes(24).toString('base64url')
-    const profileDir = await mkdtemp(join(tmpdir(), 'browserbox-start-'))
+    const profileDir = await mkdtemp(join(tmpdir(), 'browserbay-start-'))
     const box = run(['start'], {
       PORT: String(port),
-      BROWSERBOX_API_KEY: API_KEY,
-      BROWSERBOX_ENROLLMENT_SECRETS: `remote:${createHash('sha256').update(remoteSecret).digest('hex')}`,
-      BROWSERBOX_NODE_ID: 'local-node',
-      BROWSERBOX_MAX_CONTEXTS: '2',
-      BROWSERBOX_DRAIN_SECONDS: '1',
-      BROWSERBOX_CHROMIUM_EXECUTABLE: executable,
-      BROWSERBOX_PROFILE_DIR: profileDir
+      BROWSERBAY_API_KEY: API_KEY,
+      BROWSERBAY_ENROLLMENT_SECRETS: `remote:${createHash('sha256').update(remoteSecret).digest('hex')}`,
+      BROWSERBAY_NODE_ID: 'local-node',
+      BROWSERBAY_MAX_CONTEXTS: '2',
+      BROWSERBAY_DRAIN_SECONDS: '1',
+      BROWSERBAY_CHROMIUM_EXECUTABLE: executable,
+      BROWSERBAY_PROFILE_DIR: profileDir
     })
     const url = `http://127.0.0.1:${port}`
-    const client = createBrowserBox({ url, apiKey: API_KEY })
+    const client = createBrowserBay({ url, apiKey: API_KEY })
     const { server, origin } = await serve()
     let remote: Awaited<ReturnType<typeof startNode>> | undefined
     try {

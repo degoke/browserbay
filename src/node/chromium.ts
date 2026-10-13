@@ -1,11 +1,11 @@
 /**
- * Finding and starting Chromium inside the browserbox image. Plain Node, no dependencies.
+ * Finding and starting Chromium inside the browserbay image.
  */
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-export function findChromium(env = process.env) {
-  const override = env.BROWSERBOX_CHROMIUM_EXECUTABLE
+export function findChromium(env: NodeJS.ProcessEnv = process.env): string | null {
+  const override = env.BROWSERBAY_CHROMIUM_EXECUTABLE
   if (override) return override
   const root = env.PLAYWRIGHT_BROWSERS_PATH || '/ms-playwright'
   for (const entry of existsSync(root) ? readdirSync(root) : []) {
@@ -26,7 +26,15 @@ export function findChromium(env = process.env) {
  * (Chromium's sandbox wants user namespaces the platform rarely grants). The BrowserContext per slot is the isolation
  * between slots, unless the sandbox can be enabled; see "Isolation" in the README.
  */
-export function chromiumArgs({ profileDir, headless = true, sandbox = false }) {
+export function chromiumArgs({
+  profileDir,
+  headless = true,
+  sandbox = false
+}: {
+  profileDir: string
+  headless?: boolean
+  sandbox?: boolean
+}): string[] {
   return [
     '--remote-debugging-pipe',
     `--user-data-dir=${profileDir}`,
@@ -80,16 +88,16 @@ const CHROMIUM_ENV = new Set([
 ])
 
 /**
- * `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH` is how an operator adds to that (a headful node under Xvfb or on a GL host may
+ * `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH` is how an operator adds to that (a headful node under Xvfb or on a GL host may
  * need LIBGL_*, MESA_*, GTK_*, DBUS_SESSION_BUS_ADDRESS or a custom CA variable): comma-separated variable names. It
  * can never pass the box's own settings, whatever it lists.
  */
-export function chromiumEnv(env = process.env) {
+export function chromiumEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
   const extra = new Set(
-    (env.BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH ?? '')
+    (env.BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH ?? '')
       .split(',')
       .map((name) => name.trim())
-      .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith('BROWSERBOX_'))
+      .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith('BROWSERBAY_'))
   )
   return Object.fromEntries(
     Object.entries(env).filter(([name]) => CHROMIUM_ENV.has(name) || extra.has(name) || name.startsWith('LC_'))
