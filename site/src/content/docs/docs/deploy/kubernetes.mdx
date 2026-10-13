@@ -1,0 +1,217 @@
+---
+title: Kubernetes
+description: Run browserbay with the Helm chart, with a relay and nodes that scale on their own.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components'
+
+The Helm chart is in the repository at [`deploy/helm/browserbay`](https://github.com/degoke/browserbay/tree/main/deploy/helm/browserbay). It is not published to a chart repository yet, so install it from a checkout of the repository.
+
+It has two modes:
+
+| Mode              | What runs                                                                    | Scales                                                                                |
+| ----------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `split` (default) | A **relay** Deployment with one replica, and a separate **node** Deployment. | The nodes scale on their own, by hand or with an autoscaler. The relay does not move. |
+| `allInOne`        | One pod that is a complete box, relay and Chromium together.                 | It does not. Good for trying browserbay out, or for a small fixed need.               |
+
+## Split mode
+
+<Steps>
+
+1. **Serve the relay over HTTPS.** Turn on the chart's ingress, with TLS and long timeouts, because a DevTools connection stays open as long as a browser is in use. For ingress-nginx:
+
+   ```yaml
+   # values.yaml
+   relay:
+     ingress:
+       enabled: true
+       className: nginx
+       annotations:
+         nginx.ingress.kubernetes.io/proxy-read-timeout: '3600'
+         nginx.ingress.kubernetes.io/proxy-send-timeout: '3600'
+       hosts:
+         - host: browsers.example.com
+           paths:
+             - path: /
+               pathType: Prefix
+       tls:
+         - secretName: browsers-tls
+           hosts: [browsers.example.com]
+   ```
+
+2. **Tell the nodes where the relay is.** Nodes dial **out** to the relay, and by default they must use its `https://` address.
+
+   ```yaml
+   node:
+     relayUrl: https://browsers.example.com
+   ```
+
+   <Aside type="note" title="Why plain http is refused by default">
+     A node refuses a plain `http://` relay on another machine, because its enrollment secret travels to the relay. In a
+     cluster the relay is never on the node's machine, so the in-cluster Service address is refused unless you opt in
+     (see [On a trusted network](#on-a-trusted-network)). The chart fails the install if `node.relayUrl` is empty and
+     the opt-in is off.
+   </Aside>
+
+3. **Install.**
+
+   ```sh
+   helm install browserbay ./deploy/helm/browserbay -n browserbay --create-namespace -f values.yaml
+   ```
+
+4. **Check it.** The chart prints how to read the API key. Then:
+
+   ```sh
+   curl -H "Authorization: Bearer $BROWSERBAY_API_KEY" https://browsers.example.com/v1/nodes
+   ```
+
+   You should see one entry per node pod.
+
+</Steps>
+
+## On a trusted network
+
+If you trust the cluster network, the nodes can reach the relay by its in-cluster Service over plain http, with no ingress and no certificate for that hop:
+
+```yaml
+node:
+  allowInsecureRelay: true # relayUrl may stay empty
+```
+
+The nodes then dial `http://<release>-browserbay.<namespace>.svc:8788`. This sets `BROWSERBAY_ALLOW_INSECURE_RELAY=true` on them, and a node logs a warning each time it starts.
+
+<Aside type="caution" title="What you are trusting">
+  The node's enrollment secret crosses the cluster network without TLS. Use this only if you trust that network, or it
+  is already encrypted for you by a service mesh or your CNI. The relay still needs HTTPS for your own services outside
+  the cluster, because the API key and slot tokens travel there too. With `node.networkPolicy.enabled`, the chart also
+  allows the nodes to reach the relay pods.
+</Aside>
+
+The option only permits plain `http://` and `ws://` to a private address: a private IP range, a single-label name such as `relay`, or a `.svc`, `.internal` or `.local` name. A public address is still refused, so a mistaken `relayUrl` cannot send the secret across the internet. Other protocols are refused too, and an `https://` address works as before.
+
+## Scale the nodes
+
+The node Deployment is separate from the relay, so you size it without touching the relay.
+
+```sh
+kubectl -n browserbay scale deploy/browserbay-node --replicas=5
+```
+
+Or let a HorizontalPodAutoscaler do it:
+
+```yaml
+node:
+  maxContexts: 5 # browsers per node
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+```
+
+Each node pod joins under its own pod name, so new pods appear in `/v1/nodes` as they start, and the relay places new browsers on whichever node has room.
+
+**Scaling down is graceful.** Kubernetes sends `SIGTERM`, and the node stops taking new browsers and waits for the ones in use, up to `node.drainSeconds` (120 by default). The pod's grace period is that plus 10 seconds, so Kubernetes waits too. A browser still open after the drain time is lost, so set `drainSeconds` to at least as long as a typical browser is held. The autoscaler's scale-down is deliberately slow (a 10 minute stabilization window, one pod every 2 minutes) so a short lull does not remove nodes that are about to be busy.
+
+<Aside type="note" title="What the autoscaler measures">
+  CPU is a rough stand-in for how many browsers a node is serving. browserbay does not expose a "slots in use" metric
+  for an autoscaler yet. `/v1/nodes` reports each node's `contexts` and `maxContexts` if you want to build one.
+</Aside>
+
+Other things the chart does for nodes:
+
+- **Rolling updates keep capacity.** `maxSurge: 1, maxUnavailable: 0`: a new node starts before an old one is stopped. A node has no port to probe, so a new pod counts as available only after it has stayed up for `node.minReadySeconds` (30 by default). A node that exits at once, because of a bad relay address or secret, therefore stalls the rollout and leaves the old nodes serving. A node that stays up but cannot reach the relay is not caught: check `/v1/nodes` after an upgrade.
+- **A disruption budget.** `node.podDisruptionBudget` keeps most nodes through a cluster drain (`maxUnavailable: 1` by default).
+- **Spread.** `node.topologySpreadConstraints`, `affinity`, `nodeSelector` and `tolerations` all pass through, so you can put browsers on a dedicated node pool.
+
+## The relay
+
+The relay runs as **exactly one replica**, with the `Recreate` strategy, because the nodes' connections live in that process and two relays must never run at once. An upgrade of the relay therefore has a short gap. Nodes reconnect on their own within about 15 seconds and keep the browsers they hold, so existing slot tokens keep working.
+
+## Secrets
+
+By default the chart makes the API key and the node enrollment secret on first install and keeps them across upgrades. Read the API key with:
+
+```sh
+kubectl -n browserbay get secret browserbay -o jsonpath='{.data.apiKey}' | base64 -d
+```
+
+<Aside type="caution" title="Rendering without a cluster">
+  The chart keeps existing secrets by reading them back from the cluster, which `helm template` and GitOps renderers
+  such as Argo CD cannot do. They would generate new keys on every render. In those setups manage the Secret yourself
+  and point the chart at it.
+</Aside>
+
+To use your own Secret:
+
+```sh
+docker run --rm ghcr.io/degoke/browserbay secret nodes   # prints both halves of the enrollment secret
+kubectl -n browserbay create secret generic browserbay-auth \
+  --from-literal=apiKey="$(openssl rand -base64 24)" \
+  --from-literal=enrollmentSecret=<the node secret> \
+  --from-literal=enrollmentSecrets=nodes:<the sha256>
+```
+
+```yaml
+auth:
+  existingSecret: browserbay-auth
+```
+
+## Hardening
+
+- **Keep browsers off your private network.** A page can reach anything its pod can. `node.networkPolicy.enabled: true` allows the node pods DNS and the public internet only, and blocks the private ranges and the cloud metadata address. If the relay's address resolves to a private IP (an internal load balancer), allow it in `node.networkPolicy.extraEgress`. The policy also assumes your cluster's DNS pods carry the label `k8s-app: kube-dns`. If yours are labelled differently, or you run NodeLocal DNSCache (a link-local address, which the policy would otherwise block), set `node.networkPolicy.dnsPeers`. Without a matching rule the nodes cannot resolve any name.
+- **A private certificate authority.** If the relay's certificate comes from an internal CA, mount the CA and point Node at it:
+
+  ```yaml
+  node:
+    extraEnv:
+      - name: NODE_EXTRA_CA_CERTS
+        value: /certs/ca.crt
+    extraVolumes:
+      - name: relay-ca
+        secret:
+          secretName: relay-ca
+    extraVolumeMounts:
+      - name: relay-ca
+        mountPath: /certs
+        readOnly: true
+  ```
+
+- **Pod security.** Pods run as a non-root user with all capabilities dropped and no privilege escalation. Chromium's own sandbox stays off by default, because most clusters do not allow the user namespaces it needs. See [Trust and isolation](/docs/security/trust/).
+
+## Several API keys and a Chromium per slot
+
+The chart makes one unrestricted API key. The box also takes [several keys confined to namespaces](/docs/deploy/configuration/#several-api-keys) and [a Chromium per slot](/docs/deploy/configuration/#isolation-a-shared-chromium-or-one-per-slot). Both are ordinary environment variables, so `extraEnv` carries them. In split mode the keys belong to the relay and the isolation to the nodes (in all-in-one mode both go in `node.extraEnv`):
+
+```yaml
+relay:
+  extraEnv:
+    - name: BROWSERBAY_API_KEYS
+      valueFrom:
+        secretKeyRef: { name: browserbay-keys, key: entries } # from `browserbay key <name> --namespace <ns> --quota <n>`
+node:
+  extraEnv:
+    - name: BROWSERBAY_ISOLATION
+      value: process
+  resources:
+    requests: { memory: 4Gi } # a Chromium per slot: size for several hundred MB each
+```
+
+I have not run this combination on a cluster. The chart passes the variables through unchanged.
+
+## All-in-one mode
+
+```sh
+helm install browserbay ./deploy/helm/browserbay -n browserbay --create-namespace --set mode=allInOne
+kubectl -n browserbay port-forward svc/browserbay 8788:8788
+```
+
+The pod is the relay and a node, so nothing needs a public relay address. It cannot scale out, and `node.replicas` and `node.autoscaling` do not apply. `allInOne.acceptRemoteNodes: true` lets nodes elsewhere join it.
+
+## What was tested
+
+Both modes were installed on a Kubernetes 1.27 cluster (kind) and driven with Playwright through the relay. In split mode the nodes joined over HTTPS, scaling the node Deployment from 2 to 3 to 1 left the relay pod untouched, and deleting a node pod that held a browser left the browser alive and usable while the node drained, then the node left once the browser was released. With `node.allowInsecureRelay` the nodes joined over the in-cluster Service with no ingress or certificate, and a plain `http://` address without the opt-in was refused. A rollout with a bad relay address stalled while both working nodes kept serving.
+
+The chart validates its values against a schema, so a misspelled or mistyped setting is an install error and not silently ignored.
+
+See the chart's [values.yaml](https://github.com/degoke/browserbay/blob/main/deploy/helm/browserbay/values.yaml) for every setting.

@@ -1,0 +1,76 @@
+---
+title: Configuration
+description: Every environment variable the relay, the nodes and the all-in-one box read.
+---
+
+All settings are environment variables. There are no config files.
+
+## Relay
+
+Used by `browserbay relay`, and by `browserbay start` (where remote nodes are optional).
+
+| Variable                         | Default | Meaning                                                                                                                                                |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BROWSERBAY_API_KEY`             | none    | An unrestricted key, at least 16 characters. `openssl rand -base64 24` makes one. At least one of this and `BROWSERBAY_API_KEYS` is required.          |
+| `BROWSERBAY_API_KEYS`            | none    | Keys for several services, each optionally confined to a namespace with a quota. See [Several API keys](/docs/deploy/configuration/#several-api-keys). |
+| `BROWSERBAY_ENROLLMENT_SECRETS`  | none    | Comma-separated `name:sha256` pairs, one per node or group of nodes allowed to join. Required for a standalone relay, optional for `start`.            |
+| `PORT`                           | `8788`  | Where the relay listens.                                                                                                                               |
+| `BROWSERBAY_MAX_ACQUIRE_WAIT_MS` | `60000` | The longest a client may wait for a free slot, 0 to 300000.                                                                                            |
+
+## Node
+
+Used by `browserbay node`, and by the node inside `browserbay start`.
+
+| Variable                              | Default          | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BROWSERBAY_RELAY_URL`                | none             | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it.                                                                                                                                                                                                                                                                                                                  |
+| `BROWSERBAY_ENROLLMENT_SECRET`        | none             | **Required**, at least 16 characters.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `BROWSERBAY_ALLOW_INSECURE_RELAY`     | `false`          | `true` lets the relay address be plain `http://` or `ws://` when it is on a private network: a private address (a private IP range, a single-label name such as `relay`, or a `.svc`, `.internal` or `.local` name). The enrollment secret then crosses that network without TLS, so use it only on one you trust, such as a cluster's own network. A public address is still refused. A warning is logged on every start. Only the exact word `true` turns it on. |
+| `BROWSERBAY_NODE_ID`                  | the hostname     | A name, unique per replica. A second node with the same name replaces the first. Letters, digits, `_`, `.`, `-`.                                                                                                                                                                                                                                                                                                                                                   |
+| `BROWSERBAY_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100. With `BROWSERBAY_ISOLATION=process`, concurrent Chromium processes: size it for that.                                                                                                                                                                                                                                                                                                                                     |
+| `BROWSERBAY_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots after `SIGTERM`. 0 or more. Empty means the default.                                                                                                                                                                                                                                                                                                                                                                  |
+| `BROWSERBAY_ISOLATION`                | `context`        | `process` starts a Chromium per slot instead of one shared by all. See [Isolation](#isolation-a-shared-chromium-or-one-per-slot).                                                                                                                                                                                                                                                                                                                                  |
+| `BROWSERBAY_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on. It needs user namespaces. See [Trust and isolation](/docs/security/trust/).                                                                                                                                                                                                                                                                                                                                                |
+| `BROWSERBAY_HEADLESS`                 | `true`           | `false` for a headful browser. It needs a display.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `BROWSERBAY_PROFILE_DIR`              | a fresh temp dir | Chromium's profile. With `BROWSERBAY_ISOLATION=process`, the directory each slot's profile is made in (`<dir>/<slot id>`, removed with the slot).                                                                                                                                                                                                                                                                                                                  |
+| `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see. Never passes `BROWSERBAY_*`.                                                                                                                                                                                                                                                                                                                                                           |
+| `BROWSERBAY_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+
+## Several API keys
+
+One `BROWSERBAY_API_KEY` is an unrestricted key, which is all a single project needs. To share a box, give each project its own key in `BROWSERBAY_API_KEYS`, a comma-separated list of `name:sha256[:namespace[:quota]]` entries. The relay holds hashes, like the enrollment secrets. Make an entry with:
+
+```sh
+docker run --rm ghcr.io/degoke/browserbay key billing --namespace billing --quota 5
+```
+
+It prints the key for the service (its client's `apiKey`) and the entry for the relay. Both settings can be used together: `BROWSERBAY_API_KEY` is the key named `default`.
+
+- **`namespace`** confines the key. It can only create slots whose run id starts with `<namespace>:` (a client does this when it is made with the same `namespace`; anything else is `403`), it only lists and releases such slots, and it cannot list nodes. A key without a namespace sees and releases everything: that is the operator's key.
+- **`quota`** (it needs a namespace) is the most slots the namespace may hold at once, counting browsers still being created. The next request is refused at once with `429`; it does not wait for a slot to free up.
+- Names, hashes and namespaces must each be unique across the entries.
+- Slot tokens are unchanged: whoever holds a slot's token can drive that slot, whatever key made it.
+
+## Isolation: a shared Chromium, or one per slot
+
+`BROWSERBAY_ISOLATION` is a node setting (the all-in-one box takes it too).
+
+|                                               | `context` (default)                                        | `process`                                                |
+| --------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------- |
+| Browser                                       | one Chromium per node; each slot is a BrowserContext in it | one Chromium per slot, with its own profile directory    |
+| A hostile or runaway page                     | can take every slot on the node with it                    | takes only its own slot                                  |
+| Memory and start-up                           | light; a slot is ready at once                             | a few hundred MB per slot; about a second to start       |
+| `page.pdf()`, tracing, `browser.newContext()` | refused                                                    | work                                                     |
+| Ending a slot                                 | its context is disposed                                    | its Chromium is killed and its profile directory removed |
+
+With `process`, a slot's browser that crashes ends that slot only (its client is disconnected, `slot.isAlive()` turns `false` at once, and the node carries on), where with `context` a crash ends the node.
+
+`process` does **not** change how a slot is held away from the machine: the client still cannot open `file:` or `chrome:` pages, read a file path into a page, or choose where a download goes, and the browser still starts with an allowlisted environment. A page that escapes Chromium's renderer sandbox is also still inside the node's container or VM, so `BROWSERBAY_CHROMIUM_SANDBOX=true` matters just as much in either mode. Two browser-wide calls become available that you may not want a client to have: `SystemInfo` tells it about the machine's hardware, and `browser.newContext({ proxy })` lets it point a context at a proxy of its choosing.
+
+## Three secrets, three jobs
+
+- The **enrollment secret** lets a node join. It goes between node and relay.
+- The **API key** lets your services create, list and release browsers. It is never sent to a browser.
+- The **slot token** reaches one slot's browser. See [Trust and isolation](/docs/security/trust/) for what that means.
+
+Make keys and secrets with the [CLI](/docs/reference/cli/): `browserbay key` and `browserbay secret <name>`.

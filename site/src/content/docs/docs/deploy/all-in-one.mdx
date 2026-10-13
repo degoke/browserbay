@@ -1,0 +1,56 @@
+---
+title: All-in-one
+description: One container that is a complete box, with the relay and a Chromium node together.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+`browserbay start` is the default command. It runs the relay and one Chromium node in a single process. For one machine's worth of browsers, this is all you need.
+
+<Tabs>
+  <TabItem label="docker run">
+    ```sh
+    export BROWSERBAY_API_KEY="$(openssl rand -base64 24)"
+    docker run -d --name browserbay --restart always --init --stop-timeout 130 \
+      -p 127.0.0.1:8788:8788 -e BROWSERBAY_API_KEY \
+      ghcr.io/degoke/browserbay
+    ```
+  </TabItem>
+  <TabItem label="Compose">
+    From a checkout of the repository:
+
+    ```sh
+    export BROWSERBAY_API_KEY="$(openssl rand -base64 24)"
+    docker compose up -d
+    ```
+
+    The included `compose.yml` publishes the port on `127.0.0.1`, sets `restart: always` and a `stop_grace_period` of 130 seconds.
+
+  </TabItem>
+</Tabs>
+
+## Three things to get right
+
+**HTTPS.** The container listens on `127.0.0.1` only. Before anything outside the machine talks to it, put it behind HTTPS with WebSocket support: your platform's proxy, Caddy or a tunnel. The API key and the slot tokens travel to it.
+
+**Restart policy.** Give the container a restart policy of "always". The process leaves when Chromium does, and comes back with an empty box. Slots that were on it are gone, and the next `acquire` gets a fresh browser.
+
+**Stop timeout.** A stopping node waits for slots in use, 120 seconds by default (`BROWSERBAY_DRAIN_SECONDS`). Docker and Compose give a container 10 seconds before killing it, so set `--stop-timeout` (Compose: `stop_grace_period`) to the drain time plus a margin. Kubernetes calls it `terminationGracePeriodSeconds`.
+
+## Settings
+
+| Variable                         | Default | Meaning                                                                                                                                                  |
+| -------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BROWSERBAY_API_KEY`             | none    | An unrestricted key, at least 16 characters. `openssl rand -base64 24` makes one. At least one of this and `BROWSERBAY_API_KEYS` is required.            |
+| `BROWSERBAY_API_KEYS`            | none    | Keys for several services, each optionally confined to a namespace with a quota. See [Several API keys](/docs/deploy/configuration/#several-api-keys).   |
+| `PORT`                           | `8788`  | Where the relay listens.                                                                                                                                 |
+| `BROWSERBAY_MAX_CONTEXTS`        | `5`     | Concurrent slots (with `BROWSERBAY_ISOLATION=process`, concurrent Chromium processes). Size it to the machine's memory, and measure with your own pages. |
+| `BROWSERBAY_MAX_ACQUIRE_WAIT_MS` | `60000` | The longest a client may wait for a free slot, whatever it asks for.                                                                                     |
+| `BROWSERBAY_ENROLLMENT_SECRETS`  | none    | Optional `name:sha256` entries that let remote nodes join this box. See [Relay and nodes](/docs/deploy/split/).                                          |
+
+The node settings in [Configuration](/docs/deploy/configuration/) apply too.
+
+<Aside>
+  An all-in-one box can also take remote nodes. Set `BROWSERBAY_ENROLLMENT_SECRETS` on it and point the other nodes at
+  it.
+</Aside>

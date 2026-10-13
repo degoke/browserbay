@@ -1,0 +1,58 @@
+{{- if .Values.node.networkPolicy.enabled }}
+# Keeps browsers off the cluster's private ranges and the cloud metadata address, so a page cannot be used to reach
+# other services (SSRF). Nothing connects in to a node. Out, it may resolve names and reach the public internet.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "browserbay.nodeName" . }}
+  labels:
+    {{- include "browserbay.labels" (dict "ctx" . "component" "node") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- if eq .Values.mode "split" }}
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "node") | nindent 6 }}
+      {{- else }}
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "relay") | nindent 6 }}
+      {{- end }}
+  policyTypes:
+    - Ingress
+    - Egress
+  {{- if eq .Values.mode "split" }}
+  ingress: []
+  {{- else }}
+  # All-in-one: the pod is also the relay, so services must still reach its port.
+  ingress:
+    - ports:
+        - port: 8788
+          protocol: TCP
+  {{- end }}
+  egress:
+    - to:
+        {{- toYaml .Values.node.networkPolicy.dnsPeers | nindent 8 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.node.networkPolicy.blockedCidrs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+    {{- if and (eq .Values.mode "split") .Values.node.allowInsecureRelay (not .Values.node.relayUrl) }}
+    # The relay, by its in-cluster Service (node.allowInsecureRelay).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "relay") | nindent 14 }}
+      ports:
+        - port: 8788
+          protocol: TCP
+    {{- end }}
+    {{- with .Values.node.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,112 @@
+{{- if eq .Values.mode "allInOne" }}
+# One pod that is a whole box: the relay and a Chromium node in one process (`browserbay start`). It cannot scale out:
+# there is one relay, and it is this one. Use mode: split to run nodes of their own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "browserbay.fullname" . }}
+  labels:
+    {{- include "browserbay.labels" (dict "ctx" . "component" "relay") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "relay") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "browserbay.labels" (dict "ctx" . "component" "relay") | nindent 8 }}
+        {{- with .Values.node.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "browserbay.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ add (int .Values.node.drainSeconds) 10 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: box
+          image: {{ include "browserbay.image" (dict "image" .Values.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["start"]
+          ports:
+            - name: http
+              containerPort: 8788
+          env:
+            - name: PORT
+              value: "8788"
+            - name: BROWSERBAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "browserbay.secretName" . }}
+                  key: apiKey
+            {{- if .Values.allInOne.acceptRemoteNodes }}
+            - name: BROWSERBAY_ENROLLMENT_SECRETS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "browserbay.secretName" . }}
+                  key: enrollmentSecrets
+            {{- end }}
+            - name: BROWSERBAY_MAX_ACQUIRE_WAIT_MS
+              value: {{ int .Values.relay.maxAcquireWaitMs | toString | quote }}
+            {{- include "browserbay.nodeEnv" . | nindent 12 }}
+            {{- with .Values.node.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 4
+            initialDelaySeconds: 20
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.node.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            {{- with .Values.node.tmpVolume.medium }}
+            medium: {{ . }}
+            {{- end }}
+            sizeLimit: {{ .Values.node.tmpVolume.sizeLimit }}
+        {{- with .Values.node.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

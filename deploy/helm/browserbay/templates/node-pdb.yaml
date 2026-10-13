@@ -1,0 +1,13 @@
+{{- if and (eq .Values.mode "split") .Values.node.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "browserbay.nodeName" . }}
+  labels:
+    {{- include "browserbay.labels" (dict "ctx" . "component" "node") | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.node.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "node") | nindent 6 }}
+{{- end }}

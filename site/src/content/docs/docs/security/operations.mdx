@@ -1,0 +1,34 @@
+---
+title: Operations
+description: What happens when things fail, and how to stop, upgrade and watch a box.
+---
+
+## When things fail
+
+**A node's browser crashes.** The node exits and the platform restarts it. Its slots are reported unreachable (`slot.isAlive()` is `false`), and the next `acquire` gets a fresh browser. Nothing is retried on its own.
+
+**The relay restarts.** Nodes reconnect on their own and list the contexts they still hold, with a hash of each slot's token. The relay adopts them, so existing tokens keep working. A node whose control socket drops keeps its slots for about fifteen seconds before the relay gives up on it.
+
+**A client dies mid-use.** Every browser closes itself at its `maxLifetimeSeconds`, even while the relay is unreachable. For something sooner, run `box.reap(...)` on a schedule. See [Hand off and clean up](/docs/guides/hand-off/).
+
+**A create does not finish.** If a node does not confirm a new slot in time, or its connection drops while it is being made, the relay tells the node to close it and will not adopt it later. A slow node does not leave a browser holding a place that nobody can use.
+
+## Stopping and upgrading
+
+**Stopping a node.** On `SIGTERM` it stops taking slots, waits up to `BROWSERBAY_DRAIN_SECONDS` for the current ones, then exits. The platform has to wait that long too, or it kills the node first: `docker stop --time`, Compose `stop_grace_period`, or a Kubernetes `terminationGracePeriodSeconds`.
+
+**Mismatched versions.** The node and the relay each announce their protocol version. The relay closes a node that speaks another one (code `4426`) and the node logs a warning. Upgrade the relay and the nodes together.
+
+**Rotating an enrollment secret.** See [Relay and nodes](/docs/deploy/split/#rotating-an-enrollment-secret).
+
+## Reading the logs
+
+**Chromium's `dbus` errors** ("Failed to connect to the bus") are harmless in a container. There is no desktop bus to find.
+
+A node that cannot join the relay says why: an unreachable address, a wrong secret, an invalid id or slot count, or a duplicate id. It keeps trying.
+
+## Capacity and bandwidth
+
+Size `BROWSERBAY_MAX_CONTEXTS` to the machine's memory and measure with your own pages. The default is 5 per node.
+
+Watching a slot through [live view](/docs/guides/live-view/) costs about the frame size times the frame rate through the node and the relay. Budget the relay's network for roughly 2 MB/s per concurrent watcher in the worst case, a page that repaints every frame, and measure on your real network.

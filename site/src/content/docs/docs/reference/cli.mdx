@@ -1,0 +1,48 @@
+---
+title: CLI
+description: The browserbay command and its five subcommands.
+---
+
+The `browserbay` command is what the Docker images run. From a checkout, run it as `node dist/cli.js <command>` after `pnpm build`.
+
+| Command                                              | Does                                                                                                                                                                                                                              |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browserbay start`                                   | The relay and a browser node in one process. The simplest box, and the default in the `browserbay` image.                                                                                                                         |
+| `browserbay relay`                                   | The relay alone. Clients and remote nodes connect to it. The default in the `browserbay-relay` image.                                                                                                                             |
+| `browserbay node`                                    | A browser node alone. It dials out to a relay.                                                                                                                                                                                    |
+| `browserbay secret [name]`                           | Makes an enrollment secret for a node, and the entry the relay needs for it. The name defaults to `node`.                                                                                                                         |
+| `browserbay key [name [--namespace ns] [--quota n]]` | Prints a new API key. With a name it also prints the `BROWSERBAY_API_KEYS` entry the relay needs, optionally confined to a namespace with a quota of slots. See [Several API keys](/docs/deploy/configuration/#several-api-keys). |
+
+Settings are environment variables. See [Configuration](/docs/deploy/configuration/).
+
+## secret
+
+```sh
+docker run --rm ghcr.io/degoke/browserbay secret laptop
+```
+
+```
+Give the node:   BROWSERBAY_ENROLLMENT_SECRET=<secret>
+Give the relay:  BROWSERBAY_ENROLLMENT_SECRETS=laptop:<sha256>   (comma-separate several)
+```
+
+The name may contain letters, digits, `_`, `.` and `-`. It is what the relay calls the node in its logs. The relay stores only the hash.
+
+## key
+
+```sh
+docker run --rm ghcr.io/degoke/browserbay key                      # a bare key, for BROWSERBAY_API_KEY
+docker run --rm ghcr.io/degoke/browserbay key billing --namespace billing --quota 5
+```
+
+```
+Give the service:  BROWSERBAY_API_KEY=<key>   (as the client's apiKey)
+Give the relay:    BROWSERBAY_API_KEYS=billing:<sha256>:billing:5   (comma-separate several)
+The service must create its browsers with namespace "billing".
+```
+
+A name and a namespace may contain letters, digits, `_`, `.` and `-`. `--quota` needs `--namespace`.
+
+## Exit codes
+
+A bad setting prints a sentence, not a stack trace, and exits with status `2`. An unknown command also exits `2`. Other failures exit `1`. When Chromium dies, a node exits with status `1` so the platform restarts it.

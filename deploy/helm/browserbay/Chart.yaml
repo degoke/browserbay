@@ -1,0 +1,15 @@
+apiVersion: v2
+name: browserbay
+description: Self-hosted browsers for AI agents and automation. One relay, and browser nodes that scale on their own.
+type: application
+version: 0.1.0
+appVersion: '0.1.0'
+home: https://browserbay.3adelabs.com
+sources:
+  - https://github.com/degoke/browserbay
+keywords:
+  - browser
+  - chromium
+  - playwright
+  - puppeteer
+  - cdp

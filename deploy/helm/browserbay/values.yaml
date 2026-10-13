@@ -1,0 +1,203 @@
+# browserbay: a relay (the one thing your services talk to) and browser nodes (the machines running Chromium).
+#
+# mode: split      A relay Deployment (exactly one replica) and a separate node Deployment that scales on its own,
+#                  by hand (node.replicas) or with a HorizontalPodAutoscaler (node.autoscaling). The default.
+# mode: allInOne   One pod that is a complete box: the relay and a Chromium node in one process. It cannot scale, but
+#                  it needs no public address for the relay and is the quickest way to try it.
+mode: split
+
+image:
+  # The box image: Chromium included. Used by the nodes (split) and by the single pod (allInOne).
+  repository: ghcr.io/degoke/browserbay
+  tag: '' # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+relayImage:
+  # The relay alone, no Chromium. Used in split mode.
+  repository: ghcr.io/degoke/browserbay-relay
+  tag: ''
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+# Three secrets, three jobs. By default the chart makes the API key and the node enrollment secret on first install
+# and keeps them across upgrades (it reads them back from the cluster, which `helm template` and GitOps renderers
+# such as Argo CD cannot do: use existingSecret there).
+auth:
+  # Name of a Secret you manage, with these keys:
+  #   apiKey              the API key your services present (at least 16 characters)
+  #   enrollmentSecret    the secret the nodes join with (at least 16 characters)
+  #   enrollmentSecrets   what the relay needs for it, `<name>:<sha256 of the secret>`
+  # `docker run --rm ghcr.io/degoke/browserbay secret nodes` prints both halves of the last two.
+  existingSecret: ''
+  # Set to choose your own, otherwise one is generated. At least 16 characters.
+  apiKey: ''
+  enrollmentSecret: ''
+  # The name the relay knows the nodes by (letters, digits, _ . -). Only used when the chart makes the secret.
+  enrollmentName: nodes
+
+relay:
+  maxAcquireWaitMs: 60000
+  # Where services reach the relay.
+  service:
+    type: ClusterIP
+    port: 8788
+    annotations: {}
+  # Serve the relay over HTTPS. The API key and slot tokens travel to it. It needs WebSocket support and long
+  # timeouts, because a DevTools connection stays open for as long as a browser is being driven. For ingress-nginx:
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: '3600'
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: '3600'
+  ingress:
+    enabled: false
+    className: ''
+    annotations: {}
+    hosts:
+      - host: browsers.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+    #  - secretName: browsers-tls
+    #    hosts: [browsers.example.com]
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+
+node:
+  # split mode: the relay's address. A node refuses plain http to another machine, because the enrollment secret
+  # travels to it, so this must be https (or wss): the relay's own hostname (relay.ingress above) or any other https
+  # address that reaches it. Leave it empty only together with allowInsecureRelay.
+  relayUrl: ''
+  # Let the nodes reach the relay by its in-cluster Service over plain http, with no ingress or certificate. Only a
+  # private address is accepted (a public one is still refused by the node). The
+  # enrollment secret then crosses the cluster network unencrypted: turn this on only if you trust that network (or it
+  # is encrypted for you, by a service mesh or the CNI). When relayUrl is empty the nodes use
+  # http://<release>-browserbay.<namespace>.svc:<relay.service.port>.
+  allowInsecureRelay: false
+
+  # split mode: how many nodes. Ignored when autoscaling is on.
+  replicas: 2
+  # Concurrent browsers per node. Size it to the node's memory (Chromium: plan for several hundred MB per slot).
+  maxContexts: 5
+  # How long a stopping node waits for the browsers still in use before it exits (on SIGTERM, which is what a
+  # scale-down or a rolling update sends). Browsers still open after this are lost, so set it to at least as long as
+  # a typical browser is held. The pod's terminationGracePeriodSeconds is this plus 10 seconds.
+  drainSeconds: 120
+  # How long a new node must stay up before a rolling update counts it as available. Nodes have no health port, so
+  # this is what stops a node that exits at once (a bad relay address or secret) from replacing a working one.
+  minReadySeconds: 30
+  # true keeps Chromium's own sandbox on. It needs user namespaces, which most clusters do not give a container.
+  sandbox: false
+  headless: true
+
+  resources:
+    requests:
+      cpu: '1'
+      memory: 2Gi
+    limits:
+      memory: 4Gi
+
+  # Chromium writes its scratch files here (the image starts it with --disable-dev-shm-usage).
+  tmpVolume:
+    sizeLimit: 2Gi
+    medium: ''
+
+  # Scale the node Deployment on its own. A node's CPU is a rough stand-in for how many browsers it is serving.
+  # Scale-down sends SIGTERM, so a node being removed finishes its browsers first (drainSeconds), and the slow
+  # stabilization window below keeps a short quiet spell from removing nodes that are about to be busy again.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: null
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 600
+        policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 120
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Pods
+            value: 2
+            periodSeconds: 60
+
+  # Keep a minimum of nodes through voluntary disruptions such as a node drain.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+  # Browsers can reach anything their pod can. Turn this on to keep node pods off the cluster's private ranges and
+  # metadata addresses (SSRF), allowing only DNS and the public internet. The nodes must still reach the relay, so if
+  # the relay's address resolves to a private IP (an internal load balancer), allow it in extraEgress.
+  networkPolicy:
+    enabled: false
+    # Ranges the browsers are kept out of.
+    blockedCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+    # Where the node pods may send DNS queries, as NetworkPolicy `to` peers. The default is the pods of the cluster's
+    # kube-dns or CoreDNS. If your DNS is labelled differently, or runs on a link-local address (NodeLocal DNSCache,
+    # on 169.254.20.10 by default, which blockedCidrs also covers), name it here: with no rule that matches, the nodes
+    # cannot resolve the relay or any site. For NodeLocal DNSCache add
+    #   - ipBlock:
+    #       cidr: 169.254.20.10/32
+    dnsPeers:
+      - namespaceSelector: {}
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+    # Extra egress rules, in NetworkPolicy `egress` syntax.
+    extraEgress: []
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  extraEnv: []
+  # Mount more into the node pods, for example a private CA bundle when the relay's certificate comes from an internal
+  # authority (then also set NODE_EXTRA_CA_CERTS in extraEnv to the mounted file).
+  extraVolumes: []
+  extraVolumeMounts: []
+
+allInOne:
+  # Let nodes elsewhere join this box too (adds the enrollment secret to the pod). They reach it through relay.ingress.
+  acceptRemoteNodes: false
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ''
+
+# The images run as the `node` user (uid 1000).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]

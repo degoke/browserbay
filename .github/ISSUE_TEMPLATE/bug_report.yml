@@ -1,0 +1,64 @@
+name: Bug report
+description: Something does not work the way the docs say it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **If this is a security problem, stop here** and report it privately instead: see [SECURITY.md](https://github.com/degoke/browserbay/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `browserbay` image tag or package version, for the relay and for the nodes.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it deployed?
+      options:
+        - All-in-one container (`browserbay start`)
+        - Relay and nodes in Docker
+        - Kubernetes (Helm chart)
+        - Run from source
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      options:
+        - Relay or node
+        - Node client
+        - Python client
+        - Go client
+        - Helm chart
+        - Docs or website
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: What you did, what you saw, and what you expected instead. Steps or a small script that reproduce it help most.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The relay and node logs around the problem. **Remove API keys, slot tokens and enrollment secrets first.**
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I looked for an existing issue about this.
+          required: true
+        - label: This is not a security problem (those go through SECURITY.md).
+          required: true

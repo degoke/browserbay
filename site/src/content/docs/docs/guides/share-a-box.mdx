@@ -1,0 +1,30 @@
+---
+title: Share one box
+description: Use one box for several projects with namespaces, and know where that stops.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+One box can serve several of your projects. Give each project a `namespace`:
+
+```js
+const box = createBrowserBay({
+  url: 'https://browsers.example.com',
+  apiKey: process.env.BROWSERBAY_API_KEY,
+  namespace: 'billing'
+})
+
+await box.acquire({ runId: 'invoice-1042', maxLifetimeSeconds: 600 })
+// created as "billing:invoice-1042"
+```
+
+Slots are created as `<namespace>:<runId>`. `list()` and `reap()` only see that project's slots, and the namespace is removed from the run ids they hand back. A namespace may contain letters, digits, `_`, `.` and `-`.
+
+This stops one project's cleanup from releasing another project's browsers. To make the box enforce it, give each project its own API key confined to a namespace (see [Several API keys](/docs/deploy/configuration/#several-api-keys)) and make its client with the same `namespace`. A confined key cannot create, list or release another namespace's slots, and it can have a quota.
+
+<Aside type="caution" title="Without a confined key, a namespace is a label, not a lock">
+  With one unrestricted key, every holder can still reach every slot. Even with confined keys, projects share the node:
+  slots on one node share a Chromium process unless the node runs with `BROWSERBAY_ISOLATION=process`, and even then a
+  renderer exploit is not contained. Do not share a box between parties that should not trust each other. Run a box per
+  party instead.
+</Aside>

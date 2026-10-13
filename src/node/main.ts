@@ -4,6 +4,11 @@
  *
  *   BROWSERBAY_RELAY_URL           required  the relay's base URL, e.g. https://relay.example.com
  *   BROWSERBAY_ENROLLMENT_SECRET   required  this node's enrollment secret (the relay holds its sha256)
+ *   BROWSERBAY_ALLOW_INSECURE_RELAY          'true' lets the relay address be plain http:// or ws:// when it is on a private
+ *                                            network (a private IP range, a single-label name, .svc/.internal/.local). The
+ *                                            enrollment secret then crosses that network without TLS: only for one you
+ *                                            trust, such as a Kubernetes cluster's own network. A public address is still
+ *                                            refused (default: off)
  *   BROWSERBAY_NODE_ID                       a name for this node, unique per replica (default: the hostname)
  *   BROWSERBAY_MAX_CONTEXTS                  concurrent slots on this node (default 5; size it to the node's memory)
  *   BROWSERBAY_DRAIN_SECONDS                 how long a stopping node waits for its slots (default 120)
@@ -80,7 +85,12 @@ export function parseNodeEnv(env: NodeJS.ProcessEnv = process.env) {
   if (!relayUrl || enrollmentSecret.length < 16) {
     throw new Error('BROWSERBAY_RELAY_URL and BROWSERBAY_ENROLLMENT_SECRET (at least 16 characters) are required.')
   }
-  return { relayUrl, enrollmentSecret, ...parseNodeSettings(env) }
+  return {
+    relayUrl,
+    allowInsecureRelay: env.BROWSERBAY_ALLOW_INSECURE_RELAY === 'true',
+    enrollmentSecret,
+    ...parseNodeSettings(env)
+  }
 }
 
 export const consoleLogger: AgentLogger = {

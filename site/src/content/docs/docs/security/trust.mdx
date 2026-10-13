@@ -1,0 +1,34 @@
+---
+title: Trust and isolation
+description: What a slot token is, what the box enforces, and what it does not.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+<Aside type="caution" title="Read this before handing slot tokens to anyone">
+  **A slot token is control of a browser that runs on the node's machine.** Treat it as a credential for that machine's
+  place on your network, not only for one page.
+</Aside>
+
+## What the box enforces
+
+Tested against real Chromium (`test/scope.browser.test.ts` in the repository):
+
+- **Slots cannot reach each other.** Each slot is its own BrowserContext behind a virtual DevTools endpoint that cannot see or reach another slot's pages, targets, contexts or sessions, including by guessing ids.
+- **A client is held to the web.** It cannot point a page at `file:`, `chrome:`, `devtools:`, `view-source:` or `about:` pages other than blank. Only `http(s)`, `data:` and `blob:` open. It cannot have the browser read a file path into a page (`DOM.setFileInputFiles`, dragging files in), and it cannot choose where a download goes. Downloads are denied from the start.
+- **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's: `PATH`, `HOME`, the locale (`LANG`, `LC_*`), `TZ`, the display (`DISPLAY`, `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_*`), library and font paths, and proxy and CA settings (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_*`). A headful node that needs more (`LIBGL_*`, `MESA_*`, `GTK_*`, `DBUS_SESSION_BUS_ADDRESS`) names it in `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH`. The box's own `BROWSERBAY_*` settings can never be passed.
+
+## What it does not do
+
+The box limits what a client can _ask_ of the machine. It does not make a client harmless.
+
+- **A slot can browse anything the node's network can reach.** That means localhost services, the LAN, and a cloud metadata address (`169.254.169.254`). This is SSRF, and it is inherent in giving someone a browser.
+- **The node process's own environment holds a secret.** A node's enrollment secret sits there, and in the all-in-one it is the API key. The browser's OS user can read it through the process table. The restrictions above keep a client from asking for it, but they are a filter on a very capable protocol, not a sandbox. Nothing here is proof against a flaw in that filter or in Chromium.
+- **Slots on one node share a browser process** (unless the node runs with `BROWSERBAY_ISOLATION=process`: see [Isolation](/docs/deploy/configuration/#isolation-a-shared-chromium-or-one-per-slot)). A hostile page that crashes or exhausts it takes every slot on that node with it, and a renderer exploit is not contained by a VM. Chromium's own sandbox is the control for that. It is off by default (`--no-sandbox`) because containers rarely allow the user namespaces it needs. Set `BROWSERBAY_CHROMIUM_SANDBOX=true` where yours does. A Chromium per slot stops one slot's page crashing the others, but it is not a boundary against an exploit: that still needs the sandbox, or a machine per party.
+
+## So
+
+- Give slot tokens to **services you trust**, not to end users or to code you did not write. A person watching and steering a slot through a viewer you build is fine, because that viewer sends only mouse and key events, not DevTools commands. See [Live view](/docs/guides/live-view/).
+- Run nodes on **machines with nothing to steal**. If the pages are untrusted, add egress rules that block private ranges and metadata addresses.
+- Prefer the **[split deployment](/docs/deploy/split/)** for anything sensitive. The machines with browsers then hold only a node's enrollment secret, and the API key stays on the relay's machine.
+- To serve parties that do not trust each other, **run a box per party**. A [namespace](/docs/guides/share-a-box/) is a naming convention, not a boundary.

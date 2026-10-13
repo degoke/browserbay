@@ -1,0 +1,58 @@
+/* The docs wear the brand: indigo ink, one blue, Bricolage for headings, DM Mono for code. */
+:root {
+  --sl-font: 'Instrument Sans Variable', 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: 'DM Mono', ui-monospace, Menlo, monospace;
+  --bb-display: 'Bricolage Grotesque Variable', 'Helvetica Neue', Arial, sans-serif;
+
+  /* dark (Starlight's default) */
+  --sl-color-white: #e9ecfa;
+  --sl-color-gray-1: #d0d4ee;
+  --sl-color-gray-2: #b2b8db;
+  --sl-color-gray-3: #8b92bd;
+  --sl-color-gray-4: #545b89;
+  --sl-color-gray-5: #323a66;
+  --sl-color-gray-6: #1f2547;
+  --sl-color-black: #0c0f22;
+  --sl-color-accent-low: #14224a;
+  --sl-color-accent: #2f6bff;
+  --sl-color-accent-high: #a9c1ff;
+}
+
+:root[data-theme='light'] {
+  --sl-color-white: #1b1f3b;
+  --sl-color-gray-1: #272c52;
+  --sl-color-gray-2: #3d4370;
+  --sl-color-gray-3: #5a6190;
+  --sl-color-gray-4: #8d93ba;
+  --sl-color-gray-5: #c3c8e2;
+  --sl-color-gray-6: #e4e7f4;
+  --sl-color-gray-7: #f2f4fa;
+  --sl-color-black: #ffffff;
+  --sl-color-accent-low: #dbe6ff;
+  --sl-color-accent: #1f58e6;
+  --sl-color-accent-high: #1b3fa8;
+}
+
+h1,
+h2,
+h3,
+.site-title {
+  font-family: var(--bb-display);
+  letter-spacing: -0.02em;
+}
+h1 {
+  font-weight: 700;
+}
+.site-title {
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  font-size: 1.35rem;
+}
+.site-title img,
+.site-title svg {
+  height: 1.5rem;
+  width: auto;
+}
+.sl-markdown-content h2 {
+  font-weight: 700;
+}

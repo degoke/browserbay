@@ -1,0 +1,84 @@
+---
+title: Drive a browser
+description: Connect Playwright, Puppeteer or any DevTools client to a slot.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components'
+
+A slot gives you two things: `slot.cdpUrl`, a WebSocket address, and `slot.headers`, which carry the slot token. Anything that speaks the Chrome DevTools Protocol can connect with them.
+
+<Tabs>
+  <TabItem label="Playwright">
+    ```js
+    import { chromium } from 'playwright'
+
+    const browser = await chromium.connectOverCDP(slot.cdpUrl, { headers: slot.headers })
+    const context = browser.contexts()[0] // the slot's own context
+    const page = context.pages()[0] ?? (await context.newPage())
+    await page.goto('https://example.com')
+    ```
+
+  </TabItem>
+  <TabItem label="Puppeteer">
+    ```js
+    import puppeteer from 'puppeteer-core'
+
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: slot.cdpUrl,
+      headers: slot.headers
+    })
+    const page = (await browser.pages())[0] ?? (await browser.newPage())
+    await page.goto('https://example.com')
+    ```
+
+  </TabItem>
+  <TabItem label="Anything else">
+    Open a WebSocket to `slot.cdpUrl` with the `x-browserbay-token` header from `slot.headers`, then speak DevTools Protocol JSON. The [live view guide](/docs/guides/live-view/) shows a small client written with `ws`.
+  </TabItem>
+</Tabs>
+
+Playwright 1.62 is what browserbay is tested with. Puppeteer was checked with `puppeteer-core`. Other versions that speak a compatible DevTools protocol should work, but the Chromium in the image is the one that Playwright version ships.
+
+## Always release
+
+Wrap the work so the slot goes back even when it throws:
+
+```js
+const slot = await box.acquire({ runId: 'task-42', maxLifetimeSeconds: 1800 })
+try {
+  // drive it
+} finally {
+  await slot.release()
+}
+```
+
+If your process dies before `finally` runs, the lease closes the browser at `maxLifetimeSeconds`. Pick a lifetime a little longer than the longest the job can take, from 60 seconds to 86400.
+
+## When the box is full
+
+`acquire` waits for a free slot, `waitMs` milliseconds (30 000 by default), then throws `NoCapacityError`. The box caps the wait at its own `BROWSERBAY_MAX_ACQUIRE_WAIT_MS`.
+
+```js
+import { NoCapacityError } from '@degoke/browserbay/client'
+
+try {
+  slot = await box.acquire({ runId, maxLifetimeSeconds: 600, waitMs: 5000 })
+} catch (error) {
+  if (error instanceof NoCapacityError) return retryLater()
+  throw error
+}
+```
+
+## What a slot lets you do
+
+A slot is a real browser context, held to the web:
+
+- Use `browser.contexts()[0]`. `browser.newContext()` is refused, because the slot is the context.
+- Pages open on `http(s)`, `data:`, `blob:` and `about:blank`. `file:`, `chrome:`, `devtools:` and `view-source:` are refused.
+- Downloads are denied, and so are the `IO` and `Tracing` DevTools domains. That rules out `page.pdf()` and tracing.
+- File uploads must be sent as data. Playwright's `setInputFiles({ name, mimeType, buffer })` does this for a remote client. A file path on the node is refused.
+
+<Aside>
+  These limits exist because the browser runs on the node's machine. See [Trust and isolation](/docs/security/trust/)
+  for the reasoning.
+</Aside>

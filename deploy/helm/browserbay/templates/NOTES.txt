@@ -1,0 +1,29 @@
+browserbay {{ .Chart.AppVersion }} is installed in "{{ .Release.Namespace }}" ({{ .Values.mode }} mode).
+
+Your API key:
+
+  kubectl get secret {{ include "browserbay.secretName" . }} -n {{ .Release.Namespace }} -o jsonpath='{.data.apiKey}' | base64 -d
+
+{{- if .Values.relay.ingress.enabled }}
+
+The relay is served at:
+{{- range .Values.relay.ingress.hosts }}
+  {{ if $.Values.relay.ingress.tls }}https{{ else }}http{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+The relay is the Service "{{ include "browserbay.fullname" . }}" on port {{ .Values.relay.service.port }}. To try it from your machine:
+
+  kubectl port-forward svc/{{ include "browserbay.fullname" . }} {{ .Values.relay.service.port }}:{{ .Values.relay.service.port }} -n {{ .Release.Namespace }}
+
+Put it behind HTTPS (relay.ingress) before anything outside the cluster uses it: the API key and slot tokens travel to it.
+{{- end }}
+
+Check that a node has joined:
+
+  curl -H "Authorization: Bearer $BROWSERBAY_API_KEY" <relay address>/v1/nodes
+{{- if eq .Values.mode "split" }}
+
+Nodes: {{ if .Values.node.autoscaling.enabled }}autoscaling between {{ .Values.node.autoscaling.minReplicas }} and {{ .Values.node.autoscaling.maxReplicas }}{{ else }}{{ .Values.node.replicas }} replicas (kubectl scale deploy/{{ include "browserbay.nodeName" . }} --replicas=N){{ end }}, {{ .Values.node.maxContexts }} browsers each.
+They dial out to {{ include "browserbay.nodeRelayUrl" . }}.
+{{- end }}

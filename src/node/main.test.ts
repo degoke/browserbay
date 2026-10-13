@@ -75,6 +75,17 @@ test('a stand-alone node needs the relay address and a long enough enrollment se
   assert.equal(ok.relayUrl, 'https://relay.example.com')
   assert.equal(ok.enrollmentSecret, SECRET)
   assert.equal(ok.maxContexts, 5)
+  assert.equal(ok.allowInsecureRelay, false, 'plain http to another machine is off unless asked for')
+
+  const base = { BROWSERBAY_RELAY_URL: 'http://relay.ns.svc:8788', BROWSERBAY_ENROLLMENT_SECRET: SECRET }
+  assert.equal(parseNodeEnv({ ...base, BROWSERBAY_ALLOW_INSECURE_RELAY: 'true' }).allowInsecureRelay, true)
+  for (const notTrue of ['', 'false', 'TRUE', 'yes', '1']) {
+    assert.equal(
+      parseNodeEnv({ ...base, BROWSERBAY_ALLOW_INSECURE_RELAY: notTrue }).allowInsecureRelay,
+      false,
+      `only the exact word "true" turns it on, not ${JSON.stringify(notTrue)}`
+    )
+  }
 
   assert.throws(() => parseNodeEnv({}), /BROWSERBAY_RELAY_URL and BROWSERBAY_ENROLLMENT_SECRET/)
   assert.throws(() => parseNodeEnv({ BROWSERBAY_RELAY_URL: 'https://relay.example.com' }), /ENROLLMENT_SECRET/)

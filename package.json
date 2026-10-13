@@ -6,6 +6,22 @@
     "type": "git",
     "url": "git+https://github.com/degoke/browserbay.git"
   },
+  "license": "MIT",
+  "author": "Adewoye Adegoke",
+  "homepage": "https://browserbay.3adelabs.com",
+  "bugs": {
+    "url": "https://github.com/degoke/browserbay/issues"
+  },
+  "keywords": [
+    "browser",
+    "chromium",
+    "playwright",
+    "puppeteer",
+    "cdp",
+    "devtools",
+    "automation",
+    "ai-agents"
+  ],
   "type": "module",
   "packageManager": "pnpm@10.13.1",
   "engines": {
@@ -37,6 +53,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "ci": "pnpm typecheck && pnpm format:check && pnpm test",
+    "check:package": "node scripts/check-package.mjs",
+    "release:check": "pnpm run ci && pnpm check:package",
+    "version:set": "node scripts/set-version.mjs",
     "start": "node dist/cli.js start",
     "docker:build": "docker build -t browserbay ."
   },
@@ -53,6 +72,6 @@
     "typescript": "^5.8.3"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   }
 }

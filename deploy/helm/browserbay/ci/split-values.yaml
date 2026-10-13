@@ -1,0 +1,18 @@
+node:
+  relayUrl: https://browsers.example.com
+  autoscaling:
+    enabled: true
+  networkPolicy:
+    enabled: true
+relay:
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: browsers.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: browsers-tls
+        hosts: [browsers.example.com]

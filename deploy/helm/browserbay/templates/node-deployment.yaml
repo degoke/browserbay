@@ -1,0 +1,106 @@
+{{- if eq .Values.mode "split" }}
+# The browser nodes. They dial out to the relay, so they need no Service and no inbound port, and this Deployment's
+# size has nothing to do with the relay's: change node.replicas, or turn on node.autoscaling. Each pod joins under its
+# own name (the hostname), which is unique per replica.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "browserbay.nodeName" . }}
+  labels:
+    {{- include "browserbay.labels" (dict "ctx" . "component" "node") | nindent 4 }}
+spec:
+  {{- if not .Values.node.autoscaling.enabled }}
+  replicas: {{ .Values.node.replicas }}
+  {{- end }}
+  # A node has no port to probe, so a new pod is "ready" the moment its container starts. Waiting this long before it
+  # counts keeps a rollout from retiring a working node for one that exits at once (a bad address or secret).
+  minReadySeconds: {{ int .Values.node.minReadySeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "browserbay.selectorLabels" (dict "ctx" . "component" "node") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "browserbay.labels" (dict "ctx" . "component" "node") | nindent 8 }}
+        {{- with .Values.node.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "browserbay.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # A stopping node finishes the browsers in use first (drainSeconds), so Kubernetes has to wait that long too.
+      terminationGracePeriodSeconds: {{ add (int .Values.node.drainSeconds) 10 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: node
+          image: {{ include "browserbay.image" (dict "image" .Values.image "ctx" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["node"]
+          env:
+            - name: BROWSERBAY_RELAY_URL
+              value: {{ include "browserbay.nodeRelayUrl" . | quote }}
+            {{- if .Values.node.allowInsecureRelay }}
+            - name: BROWSERBAY_ALLOW_INSECURE_RELAY
+              value: "true"
+            {{- end }}
+            - name: BROWSERBAY_ENROLLMENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "browserbay.secretName" . }}
+                  key: enrollmentSecret
+            {{- include "browserbay.nodeEnv" . | nindent 12 }}
+            {{- with .Values.node.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.node.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            {{- with .Values.node.tmpVolume.medium }}
+            medium: {{ . }}
+            {{- end }}
+            sizeLimit: {{ .Values.node.tmpVolume.sizeLimit }}
+        {{- with .Values.node.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

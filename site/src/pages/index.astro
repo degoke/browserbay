@@ -1,0 +1,1264 @@
+---
+import '@fontsource-variable/bricolage-grotesque'
+import '@fontsource-variable/instrument-sans'
+import '@fontsource/dm-mono/400.css'
+import '@fontsource/dm-mono/500.css'
+import { Code } from 'astro:components'
+import mark from '../assets/mark.svg?raw'
+import { DESCRIPTION, EYEBROW, TAGLINE } from '../site.mjs'
+
+// One inline copy of the mark: ink follows `color`, the filled slot follows --accent, so both themes use the same SVG.
+const markSvg = mark
+  .replace(/<title>.*?<\/title>\s*/s, '')
+  .replaceAll('stroke="#1B1F3B"', 'stroke="currentColor"')
+  .replace('fill="#2F6BFF"', 'class="accent"')
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '')
+const docs = (path: string) => `${base}/docs/${path}`
+const GITHUB = 'https://github.com/degoke/browserbay'
+// astro.config.mjs always sets the site address, so these are absolute URLs.
+const site = Astro.site as URL
+const pageUrl = new URL(`${base}/`, site).href
+const ogImage = new URL(`${base}/og/home.png`, site).href
+
+const title = 'browserbay: self-hosted browsers for AI agents and automation'
+const description = DESCRIPTION
+
+// What search engines read to understand the page: a website, and the open-source software it describes.
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'WebSite',
+      '@id': `${pageUrl}#website`,
+      url: pageUrl,
+      name: 'browserbay',
+      description,
+      inLanguage: 'en'
+    },
+    {
+      '@type': 'SoftwareApplication',
+      '@id': `${pageUrl}#software`,
+      name: 'browserbay',
+      url: pageUrl,
+      description,
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'Linux, macOS, Windows (Docker, Kubernetes)',
+      isAccessibleForFree: true,
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      license: 'https://opensource.org/licenses/MIT',
+      image: ogImage,
+      sameAs: [GITHUB],
+      author: { '@type': 'Person', name: 'Adewoye Adegoke' }
+    }
+  ]
+}
+
+const driveCode = `import { chromium } from 'playwright'
+import { createBrowserBay } from
+  '@degoke/browserbay/client'
+
+const box = createBrowserBay({
+  url: 'https://browsers.example.com',
+  apiKey
+})
+
+const slot = await box.acquire({
+  runId: 'task-42',
+  maxLifetimeSeconds: 1800
+})
+try {
+  const browser = await chromium.connectOverCDP(
+    slot.cdpUrl,
+    { headers: slot.headers }
+  )
+  const context = browser.contexts()[0]
+  const page =
+    context.pages()[0] ?? (await context.newPage())
+  await page.goto('https://example.com')
+} finally {
+  await slot.release()
+}`
+
+const watchCode = `// On your server: a second connection to the slot
+const ws = new WebSocket(slot.cdpUrl, {
+  headers: slot.headers
+})
+
+// Ask Chromium for frames, and send them on
+await send('Page.startScreencast',
+  { format: 'jpeg' }, sessionId)
+
+// Turn the person's click into input
+await send('Input.dispatchMouseEvent',
+  { type: 'mousePressed', x, y,
+    button: 'left', clickCount: 1 }, sessionId)`
+
+const deployCode = `export BROWSERBAY_API_KEY="$(openssl rand -base64 24)"
+
+docker run -d --name browserbay --restart always --init --stop-timeout 130 \\
+  -p 127.0.0.1:8788:8788 -e BROWSERBAY_API_KEY \\
+  ghcr.io/degoke/browserbay`
+
+const features = [
+  {
+    label: 'Isolated',
+    title: 'Every browser is its own context',
+    body: 'Each slot has its own cookies, storage and cache on a shared Chromium. A client sees its own pages and nothing else on that Chromium. This is tested against real Chromium, including attempts to reach another slot.'
+  },
+  {
+    label: 'Anywhere',
+    title: 'Deploys anywhere, dials out',
+    body: 'Run it on a VPS, a container platform or a Raspberry Pi. Nodes connect out to the relay, so a node can sit behind NAT, and no DevTools port is open anywhere.'
+  },
+  {
+    label: 'Scales',
+    title: 'Add capacity by adding nodes',
+    body: 'Start with one container. When you need more browsers, run more nodes, on any machine, and the relay schedules across them.'
+  },
+  {
+    label: 'Contained',
+    title: 'Hard to leak, easy to clean up',
+    body: 'Three separate secrets. A lease on every browser, so a crashed client cannot hold one forever. A protocol version check between relay and nodes.'
+  }
+]
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={pageUrl} />
+    <meta name="author" content="Adewoye Adegoke" />
+    <meta name="theme-color" content="#EEF1F8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0C0F22" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href={`${base}/favicon.svg`} type="image/svg+xml" />
+    <link rel="icon" href={`${base}/favicon.ico`} sizes="32x32" />
+    <link rel="apple-touch-icon" href={`${base}/apple-touch-icon.png`} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={pageUrl} />
+    <meta property="og:site_name" content="browserbay" />
+    <meta property="og:locale" content="en" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={TAGLINE.join(' ')} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+    <script is:inline>
+      // Follow the docs' theme choice when there is one, otherwise the system.
+      try {
+        var saved = localStorage.getItem('starlight-theme')
+        if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href={`${base}/`} aria-label="browserbay home">
+        <span class="mark" set:html={markSvg} />
+        <span class="wordmark">browserbay</span>
+      </a>
+      <nav aria-label="Main">
+        <a href={docs('quick-start/')}>Docs</a>
+        <a href="#live-view">Live view</a>
+        <a href={GITHUB}>GitHub</a>
+        <button type="button" class="motion-toggle" id="motion-toggle" aria-pressed="false">Pause motion</button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-head">
+          <p class="eyebrow">{EYEBROW}</p>
+          <h1>
+            {
+              TAGLINE.map((line, i) => (
+                <>
+                  <span class="beat">
+                    {i === TAGLINE.length - 1 ? (
+                      <>
+                        {line.slice(0, -1)}
+                        <span class="dot">.</span>
+                      </>
+                    ) : (
+                      line
+                    )}
+                  </span>
+                  {/* a real space between the lines: Astro's HTML compression drops whitespace between the spans */}
+                  {' '}
+                </>
+              ))
+            }
+          </h1>
+        </div>
+
+        <div class="hero-body">
+        <div class="hero-copy">
+          <p class="lead">
+            browserbay runs isolated Chromium browsers on infrastructure you control: a VPS, a Raspberry Pi,
+            Kubernetes. Drive them with Playwright, Puppeteer or any agent over the DevTools protocol, and show a live
+            view in your own app so a person can watch and take over.
+          </p>
+          <div class="cta">
+            <a class="btn primary" href={docs('quick-start/')}>Quick start</a>
+            <a class="btn" href={GITHUB}>View on GitHub</a>
+          </div>
+        </div>
+
+        <figure class="bay" aria-label="Illustration of a box with six slots, some in use">
+          <div class="bay-head">
+            <span>node-1</span>
+            <span id="bay-count">2 of 6 slots in use</span>
+          </div>
+          <div class="slots" id="slots">
+            {
+              [
+                'task-42',
+                null,
+                'agent-7f3a',
+                null,
+                null,
+                null
+              ].map((run) => (
+                <div class="slot" data-run={run ?? ''} data-on={run ? '' : undefined}>
+                  <div class="slot-body">
+                    <span class="dots"><i></i><i class="bar"></i></span>
+                  </div>
+                  <span class="slot-label">{run ?? 'free'}</span>
+                </div>
+              ))
+            }
+          </div>
+          <figcaption>Slots are leased, so a busy box frees itself.</figcaption>
+        </figure>
+        </div>
+      </section>
+
+      <section class="section how" id="how">
+        <div class="section-copy">
+          <p class="eyebrow">How it works</p>
+          <h2>Ask, drive, hand back</h2>
+          <ol class="steps">
+            <li>
+              <strong>Ask.</strong> Acquire a slot with a run id and a lease. If the box is full it waits, then tells you.
+            </li>
+            <li>
+              <strong>Drive.</strong> Connect Playwright, Puppeteer or anything that speaks the DevTools protocol.
+            </li>
+            <li>
+              <strong>Hand back.</strong> Release it. If your process dies first, the lease closes the browser anyway.
+            </li>
+          </ol>
+          <p class="clients">
+            Clients for Node, Python and Go. Anything that speaks HTTP and WebSocket works too.
+          </p>
+          <a class="more" href={docs('quick-start/')}>Quick start →</a>
+        </div>
+        <div class="code"><Code code={driveCode} lang="js" theme="github-dark" /></div>
+      </section>
+
+      <section class="section live" id="live-view">
+        <div class="viewer-wrap">
+          <figure class="viewer" aria-label="Illustration of a live view: a person watching and clicking in a browser">
+            <div class="viewer-bar">
+              <span class="url">shop.example.com/checkout</span>
+              <span class="pill"><i></i>live</span>
+            </div>
+            <div class="viewer-page">
+              <div class="sk w60"></div>
+              <div class="sk w40"></div>
+              <div class="field"></div>
+              <div class="field"></div>
+              <div class="pay">Pay now</div>
+              <svg class="cursor" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 3v16l4.5-4 3 6.5 2.8-1.3-3-6.2H18z" />
+              </svg>
+              <span class="ripple"></span>
+            </div>
+            <div class="conns">
+              <span><b>driver</b> Playwright · stepped away</span>
+              <span><b>viewer</b> a person · steering</span>
+            </div>
+          </figure>
+          <p class="note">Illustration. You build the viewer; the box supplies the stream.</p>
+        </div>
+        <div class="section-copy">
+          <p class="eyebrow">Live view</p>
+          <h2>Watch it. Steer it. Hand it back.</h2>
+          <p>
+            A slot takes more than one connection. Your service drives with Playwright. A person opens a second connection,
+            watches a stream of frames, and clicks and types in the same page. When they step away, your service
+            reconnects and finds the pages as they left them.
+          </p>
+          <ul class="points">
+            <li>
+              <strong>A second connection, not a takeover.</strong> The viewer does not push your driver off the slot.
+            </li>
+            <li>
+              <strong>People never get DevTools.</strong> Your viewer turns their clicks and keys into input events.
+              The slot token stays on your server.
+            </li>
+            <li>
+              <strong>Priced in bandwidth.</strong> A page that repaints every frame costs about 2 MB/s per watcher. A
+              still page costs almost nothing.
+            </li>
+          </ul>
+          <div class="code small"><Code code={watchCode} lang="js" theme="github-dark" /></div>
+          <a class="more" href={docs('guides/live-view/')}>Read the live view guide →</a>
+        </div>
+      </section>
+
+      <section class="section features">
+        <p class="eyebrow">What you get</p>
+        <h2>Built to be left running</h2>
+        <div class="feature-grid">
+          {
+            features.map((f) => (
+              <article class="feature">
+                <span class="tag">{f.label}</span>
+                <h3>{f.title}</h3>
+                <p>{f.body}</p>
+              </article>
+            ))
+          }
+        </div>
+      </section>
+
+      <section class="section raw">
+        <div class="section-copy">
+          <p class="eyebrow">Scope</p>
+          <h2>The box and nothing on top</h2>
+          <p>
+            browserbay gives you a browser and stops there. No agent loop, no model calls, no crawler, no screenshot
+            endpoint. That keeps the box small, and it lets one box serve a test suite, a scraper and an agent at the
+            same time.
+          </p>
+        </div>
+        <aside class="trust">
+          <h3>Know what a slot token is</h3>
+          <p>
+            A slot token is control of a browser that runs on the node's machine. Give tokens to services you trust,
+            run nodes on machines with nothing to steal, and run a box per party that should not trust each other.
+          </p>
+          <a class="more" href={docs('security/trust/')}>Trust and isolation →</a>
+        </aside>
+      </section>
+
+      <section class="section deploy" id="deploy">
+        <div class="section-copy">
+          <p class="eyebrow">Deploy</p>
+          <h2>Start with one container</h2>
+          <p>
+            The default image is a complete box: the relay and a Chromium node together. When you want browsers on
+            several machines, run one relay and add nodes as you need them, anywhere. On Kubernetes, a Helm chart runs the
+            relay once and the nodes as their own Deployment, so they scale on their own.
+          </p>
+          <div class="topology" role="img" aria-label="Your services connect to one relay. Nodes on several machines connect out to the relay.">
+            <div class="col"><span>your services</span></div>
+            <div class="arrow">→</div>
+            <div class="col strong"><span>relay</span><small>one instance</small></div>
+            <div class="arrow">←</div>
+            <div class="col"><span>nodes</span><small>VPS, Pi, laptop</small></div>
+          </div>
+          <a class="more" href={docs('deploy/kubernetes/')}>Kubernetes →</a>
+          <a class="more" href={docs('deploy/split/')}>Relay and nodes →</a>
+        </div>
+        <div class="code copyable">
+          <Code code={deployCode} lang="sh" theme="github-dark" />
+          <button type="button" class="copy" data-copy={deployCode}>Copy</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a class="brand" href={`${base}/`} aria-label="browserbay home">
+        <span class="mark" set:html={markSvg} />
+        <span class="wordmark">browserbay</span>
+      </a>
+      <nav aria-label="Footer">
+        <a href={docs('quick-start/')}>Docs</a>
+        <a href={docs('guides/live-view/')}>Live view</a>
+        <a href={docs('security/trust/')}>Trust</a>
+        <a href={GITHUB}>GitHub</a>
+        <a href={`${GITHUB}/blob/main/LICENSE`}>MIT license</a>
+      </nav>
+    </footer>
+
+    <script is:inline>
+      // The bay: slots take and give back browsers, a few at a time. Illustration only.
+      ;(function () {
+        var root = document.getElementById('slots')
+        var count = document.getElementById('bay-count')
+        if (!root) return
+        var slots = Array.prototype.slice.call(root.children)
+        var runs = ['task-42', 'agent-7f3a', 'invoice-1042', 'checkout-e2e', 'nightly-audit', 'signup-flow', 'run-9c1d']
+        var update = function () {
+          var used = slots.filter(function (s) { return s.hasAttribute('data-on') }).length
+          if (count) count.textContent = used + ' of ' + slots.length + ' slots in use'
+        }
+        var tick = function () {
+          var i = Math.floor(Math.random() * slots.length)
+          var s = slots[i]
+          var used = slots.filter(function (x) { return x.hasAttribute('data-on') }).length
+          if (s.hasAttribute('data-on') && used > 1) {
+            s.removeAttribute('data-on')
+            s.querySelector('.slot-label').textContent = 'free'
+          } else if (!s.hasAttribute('data-on') && used < slots.length - 1) {
+            s.setAttribute('data-on', '')
+            s.querySelector('.slot-label').textContent = runs[Math.floor(Math.random() * runs.length)]
+          }
+          update()
+        }
+        update()
+
+        // Motion runs only while it is wanted: not paused, tab visible, bay on screen.
+        var paused = false
+        var onScreen = true
+        var toggle = document.getElementById('motion-toggle')
+        if (toggle) {
+          toggle.addEventListener('click', function () {
+            paused = !paused
+            toggle.setAttribute('aria-pressed', String(paused))
+            toggle.textContent = paused ? 'Play motion' : 'Pause motion'
+            document.documentElement.toggleAttribute('data-motion-paused', paused)
+          })
+        }
+        if ('IntersectionObserver' in window) {
+          new IntersectionObserver(function (entries) { onScreen = entries[entries.length - 1].isIntersecting }).observe(root)
+        }
+        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          setInterval(function () { if (!paused && onScreen && !document.hidden) tick() }, 2200)
+        }
+      })()
+
+      document.addEventListener('click', function (event) {
+        var button = event.target.closest && event.target.closest('[data-copy]')
+        if (!button) return
+        var done = function () {
+          button.textContent = 'Copied'
+          setTimeout(function () { button.textContent = 'Copy' }, 1600)
+        }
+        try {
+          navigator.clipboard.writeText(button.getAttribute('data-copy')).then(done, function () {})
+        } catch (e) {}
+      })
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --bg: #f3f5fb;
+    --surface: #ffffff;
+    --ink: #1b1f3b;
+    --muted: #565d86;
+    --line: #d8dcee;
+    --accent: #2f6bff;
+    --accent-ink: #ffffff;
+    --accent-text: #1f58e6;
+    --code-bg: #12162e;
+    --tint: #e6ebfb;
+    --display: 'Bricolage Grotesque Variable', 'Helvetica Neue', Arial, sans-serif;
+    --body: 'Instrument Sans Variable', 'Helvetica Neue', Arial, sans-serif;
+    --mono: 'DM Mono', ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --bg: #0c0f22;
+      --surface: #141936;
+      --ink: #e9ecfa;
+      --muted: #9aa3d1;
+      --line: #262c52;
+      --accent: #5b8cff;
+      --accent-ink: #0c0f22;
+      --accent-text: #8fb0ff;
+      --code-bg: #080a18;
+      --tint: #181e40;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme='dark'] {
+    --bg: #0c0f22;
+    --surface: #141936;
+    --ink: #e9ecfa;
+    --muted: #9aa3d1;
+    --line: #262c52;
+    --accent: #5b8cff;
+    --accent-ink: #0c0f22;
+    --accent-text: #8fb0ff;
+    --code-bg: #080a18;
+    --tint: #181e40;
+    color-scheme: dark;
+  }
+  :root[data-theme='light'] {
+    color-scheme: light;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a {
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--display);
+    letter-spacing: -0.025em;
+    margin: 0;
+    text-wrap: balance;
+  }
+  p {
+    margin: 0;
+  }
+
+  /* shell */
+  .nav,
+  main,
+  .foot {
+    width: 100%;
+    max-width: 1160px;
+    margin-inline: auto;
+    padding-inline: 24px;
+  }
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-block: 22px;
+  }
+  .nav nav,
+  .foot nav {
+    display: flex;
+    gap: 22px;
+    font-size: 15px;
+  }
+  .nav nav a,
+  .foot nav a {
+    text-decoration: none;
+    color: var(--muted);
+  }
+  .nav nav a,
+  .foot nav a {
+    white-space: nowrap;
+  }
+  .nav nav a:hover,
+  .foot nav a:hover {
+    color: var(--ink);
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+  }
+  .mark {
+    display: inline-flex;
+    width: 30px;
+    height: 30px;
+    color: var(--ink);
+  }
+  .mark .accent {
+    fill: var(--accent);
+  }
+  .mark svg {
+    width: 100%;
+    height: 100%;
+  }
+  .wordmark {
+    font-family: var(--display);
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: -0.03em;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  /* hero */
+  .hero {
+    display: flex;
+    flex-direction: column;
+    gap: 44px;
+    padding-block: 56px 88px;
+  }
+  .hero-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+    gap: 56px;
+    align-items: center;
+  }
+  .hero h1 {
+    font-size: clamp(2.1rem, 6.2vw, 5rem);
+    line-height: 1;
+    font-weight: 800;
+    letter-spacing: -0.045em;
+    margin-block: 18px 0;
+  }
+  .hero h1 .beat {
+    display: block;
+  }
+  .hero h1 .dot {
+    color: var(--accent);
+  }
+  .lead {
+    font-size: clamp(1.1rem, 2vw, 1.3rem);
+    line-height: 1.5;
+    color: var(--muted);
+    max-width: 34em;
+  }
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 32px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 13px 22px;
+    border-radius: 12px;
+    border: 1.5px solid var(--line);
+    font-weight: 600;
+    font-size: 16px;
+    text-decoration: none;
+    background: var(--surface);
+  }
+  .btn:hover {
+    border-color: var(--ink);
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  .btn.primary:hover {
+    filter: brightness(1.06);
+  }
+
+  /* the bay */
+  .bay {
+    margin: 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    padding: 18px;
+  }
+  .bay-head {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    padding: 2px 4px 14px;
+  }
+  .slots {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .slot {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .slot-body {
+    aspect-ratio: 1;
+    border-radius: 18%;
+    border: 3.5px solid var(--ink);
+    transition: background 0.4s, border-color 0.4s;
+    padding: 18% 16%;
+  }
+  .slot[data-on] .slot-body {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .slot .dots {
+    display: none;
+    align-items: center;
+    gap: 8%;
+  }
+  .slot[data-on] .dots {
+    display: flex;
+  }
+  .dots i {
+    width: 13%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--accent-ink);
+    flex: none;
+  }
+  .dots i.bar {
+    width: 48%;
+    aspect-ratio: auto;
+    height: 0;
+    padding-bottom: 8%;
+    border-radius: 99px;
+  }
+  .slot-label {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .slot[data-on] .slot-label {
+    color: var(--ink);
+  }
+  .bay figcaption {
+    font-size: 14px;
+    color: var(--muted);
+    padding: 16px 4px 2px;
+  }
+
+  /* sections */
+  .section {
+    padding-block: 72px;
+    border-top: 1px solid var(--line);
+  }
+  .section h2 {
+    font-size: clamp(2rem, 4.2vw, 3rem);
+    line-height: 1.05;
+    font-weight: 700;
+    margin-block: 12px 18px;
+  }
+  .section-copy {
+    min-width: 0;
+  }
+  .section-copy > p:not(.eyebrow) {
+    color: var(--muted);
+    max-width: 38em;
+  }
+  .how,
+  .live,
+  .raw,
+  .deploy {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+    gap: 56px;
+    align-items: start;
+  }
+  .live {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .steps {
+    list-style: none;
+    padding: 0;
+    margin: 24px 0;
+    display: grid;
+    gap: 16px;
+    counter-reset: step;
+  }
+  .steps li {
+    position: relative;
+    padding-left: 44px;
+    color: var(--muted);
+  }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 1px;
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    background: var(--tint);
+    color: var(--ink);
+  }
+  .steps strong,
+  .points strong {
+    color: var(--ink);
+  }
+  .more {
+    display: inline-block;
+    margin-top: 18px;
+    font-weight: 600;
+    color: var(--accent-text);
+    text-decoration: none;
+  }
+  .clients {
+    color: var(--muted);
+    font-size: 15.5px;
+  }
+  .section-copy > .more + .more {
+    margin-left: 22px;
+  }
+  .more:hover {
+    text-decoration: underline;
+  }
+
+  .code {
+    position: relative;
+    min-width: 0;
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--code-bg);
+  }
+  .code pre.astro-code {
+    margin: 0;
+    padding: 22px 24px;
+    background: var(--code-bg) !important;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.7;
+  }
+  .code.small {
+    margin-top: 22px;
+  }
+  .code.small pre.astro-code {
+    font-size: 12.5px;
+    padding: 18px 20px;
+  }
+  .copyable pre.astro-code {
+    padding-top: 54px;
+  }
+  .copy {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    font: 500 12px var(--mono);
+    color: #cfd5f5;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .copy:hover {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  /* live view */
+  .viewer-wrap {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+  .viewer {
+    margin: 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    overflow: hidden;
+  }
+  .viewer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--tint);
+  }
+  .url {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font: 500 12px var(--mono);
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    padding: 3px 10px;
+    flex: none;
+  }
+  .pill i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  .viewer-page {
+    position: relative;
+    padding: 28px 26px 32px;
+    display: grid;
+    gap: 14px;
+    height: 330px;
+    align-content: start;
+  }
+  .sk {
+    height: 12px;
+    border-radius: 99px;
+    background: var(--line);
+  }
+  .w60 {
+    width: 60%;
+    height: 18px;
+  }
+  .w40 {
+    width: 40%;
+  }
+  .field {
+    height: 44px;
+    border-radius: 10px;
+    border: 1.5px solid var(--line);
+  }
+  .pay {
+    justify-self: start;
+    margin-top: 6px;
+    padding: 12px 26px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+    font-size: 15px;
+    animation: pressed 7s infinite;
+  }
+  .cursor {
+    position: absolute;
+    width: 30px;
+    height: 30px;
+    left: 0;
+    top: 0;
+    fill: var(--ink);
+    stroke: var(--surface);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    animation: roam 7s infinite;
+    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.25));
+  }
+  .ripple {
+    position: absolute;
+    left: 61px;
+    top: 212px;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 2px solid var(--accent);
+    opacity: 0;
+    animation: ripple 7s infinite;
+  }
+  .conns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .conns b {
+    color: var(--ink);
+    font-weight: 500;
+    margin-right: 6px;
+  }
+  .note {
+    font-size: 13.5px;
+    color: var(--muted);
+    padding-inline: 4px;
+  }
+  .points {
+    list-style: none;
+    padding: 0;
+    margin: 24px 0 0;
+    display: grid;
+    gap: 14px;
+    color: var(--muted);
+  }
+  .points li {
+    padding-left: 18px;
+    position: relative;
+  }
+  .points li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.62em;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  @keyframes roam {
+    0%,
+    8% {
+      transform: translate(250px, 70px);
+    }
+    28%,
+    38% {
+      transform: translate(74px, 226px);
+    }
+    58%,
+    100% {
+      transform: translate(250px, 70px);
+    }
+  }
+  @keyframes ripple {
+    0%,
+    34% {
+      opacity: 0;
+      transform: scale(0.4);
+    }
+    38% {
+      opacity: 0.9;
+      transform: scale(0.6);
+    }
+    52% {
+      opacity: 0;
+      transform: scale(1.7);
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+  @keyframes pressed {
+    0%,
+    36% {
+      transform: none;
+    }
+    39% {
+      transform: scale(0.95);
+    }
+    44%,
+    100% {
+      transform: none;
+    }
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* features */
+  .features h2 {
+    max-width: 16em;
+  }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+    gap: 16px;
+    margin-top: 36px;
+  }
+  .feature {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .feature .tag {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent-text);
+  }
+  .feature h3 {
+    font-size: 1.3rem;
+    line-height: 1.15;
+    font-weight: 700;
+  }
+  .feature p {
+    color: var(--muted);
+    font-size: 15.5px;
+  }
+
+  /* scope + trust */
+  .trust {
+    background: var(--tint);
+    border-radius: 18px;
+    padding: 26px;
+    display: grid;
+    gap: 10px;
+    align-self: center;
+  }
+  .trust h3 {
+    font-size: 1.35rem;
+    font-weight: 700;
+  }
+  .trust p {
+    color: var(--muted);
+    font-size: 16px;
+  }
+  .trust .more {
+    margin-top: 6px;
+  }
+
+  /* deploy */
+  .topology {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    margin-top: 28px;
+    flex-wrap: wrap;
+  }
+  .topology .col {
+    flex: 1 1 110px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    border: 1.5px solid var(--line);
+    background: var(--surface);
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-weight: 600;
+    min-width: 0;
+  }
+  .topology .col.strong {
+    border-color: var(--accent);
+  }
+  .topology small {
+    font-family: var(--mono);
+    font-weight: 400;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .topology .arrow {
+    align-self: center;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+
+  .foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding-block: 40px 56px;
+    border-top: 1px solid var(--line);
+    margin-top: 8px;
+  }
+  .foot .mark {
+    width: 26px;
+    height: 26px;
+  }
+  .foot .wordmark {
+    font-size: 19px;
+  }
+
+  @media (max-width: 880px) {
+    .hero-body,
+    .how,
+    .live,
+    .raw,
+    .deploy {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 40px;
+    }
+    .hero {
+      padding-block: 32px 64px;
+    }
+    .section {
+      padding-block: 56px;
+    }
+    .live .viewer-wrap {
+      order: 2;
+    }
+  }
+  @media (max-width: 480px) {
+    body {
+      font-size: 16px;
+    }
+    .nav nav a[href='#live-view'] {
+      display: none;
+    }
+    .nav,
+    .nav nav {
+      flex-wrap: wrap;
+    }
+    .nav nav {
+      gap: 8px 14px;
+    }
+    .nav,
+    main,
+    .foot {
+      padding-inline: 16px;
+    }
+    .viewer-page {
+      height: 300px;
+    }
+  }
+  .motion-toggle {
+    font: 500 12px var(--mono);
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    padding: 4px 11px;
+    cursor: pointer;
+  }
+  .motion-toggle:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+  }
+  :root[data-motion-paused] .cursor,
+  :root[data-motion-paused] .ripple,
+  :root[data-motion-paused] .pay,
+  :root[data-motion-paused] .pill i {
+    animation-play-state: paused;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .motion-toggle {
+      display: none;
+    }
+    html {
+      scroll-behavior: auto;
+    }
+    .cursor,
+    .ripple,
+    .pay,
+    .pill i {
+      animation: none;
+    }
+    .cursor {
+      transform: translate(250px, 70px);
+    }
+  }
+</style>

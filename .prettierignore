@@ -1,3 +1,6 @@
 dist
 node_modules
 pnpm-lock.yaml
+.astro
+deploy/helm/*/templates
+clients/python/src/*.egg-info

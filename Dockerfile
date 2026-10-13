@@ -29,7 +29,7 @@ RUN pnpm prune --prod --ignore-scripts
 # The application as it runs: compiled output only. No sources, no tests (the build leaves them out), no dev dependencies.
 FROM base AS app
 ENV NODE_ENV=production
-COPY package.json ./
+COPY LICENSE package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
