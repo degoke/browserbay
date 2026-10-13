@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { chromiumArgs, chromiumEnv, findChromium } from './chromium.mjs'
+import { chromiumArgs, chromiumEnv, findChromium } from './chromium.js'
 
 test('chromium environment: what a browser needs passes, the box’s and the platform’s secrets do not', () => {
   const env = chromiumEnv({
@@ -18,9 +18,9 @@ test('chromium environment: what a browser needs passes, the box’s and the pla
     HTTPS_PROXY: 'http://proxy:3128',
     no_proxy: 'localhost',
     // none of these
-    BROWSERBOX_API_KEY: 'the-api-key-0123456789',
-    BROWSERBOX_ENROLLMENT_SECRET: 'the-enrollment-secret',
-    BROWSERBOX_ENROLLMENT_SECRETS: 'a:00',
+    BROWSERBAY_API_KEY: 'the-api-key-0123456789',
+    BROWSERBAY_ENROLLMENT_SECRET: 'the-enrollment-secret',
+    BROWSERBAY_ENROLLMENT_SECRETS: 'a:00',
     DATABASE_URL: 'postgres://user:password@host/db',
     AWS_SECRET_ACCESS_KEY: 'aws',
     RAILWAY_TOKEN: 'railway',
@@ -51,10 +51,10 @@ test('chromium environment: an operator can pass named variables through, but ne
     DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
     CUSTOM_CA_BUNDLE: '/etc/ca.pem',
     DATABASE_URL: 'postgres://user:password@host/db',
-    BROWSERBOX_API_KEY: 'the-api-key-0123456789',
-    BROWSERBOX_ENROLLMENT_SECRET: 'the-enrollment-secret',
-    BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH:
-      ' LIBGL_ALWAYS_SOFTWARE, DBUS_SESSION_BUS_ADDRESS ,CUSTOM_CA_BUNDLE,BROWSERBOX_API_KEY,BROWSERBOX_ENROLLMENT_SECRET,not a name,'
+    BROWSERBAY_API_KEY: 'the-api-key-0123456789',
+    BROWSERBAY_ENROLLMENT_SECRET: 'the-enrollment-secret',
+    BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH:
+      ' LIBGL_ALWAYS_SOFTWARE, DBUS_SESSION_BUS_ADDRESS ,CUSTOM_CA_BUNDLE,BROWSERBAY_API_KEY,BROWSERBAY_ENROLLMENT_SECRET,not a name,'
   })
   assert.deepEqual(Object.keys(env).sort(), [
     'CUSTOM_CA_BUNDLE',
@@ -65,7 +65,7 @@ test('chromium environment: an operator can pass named variables through, but ne
   assert.ok(!JSON.stringify(env).includes('0123456789'), 'the API key is never passed, even when it is listed')
   assert.ok(!('DATABASE_URL' in env), 'and what is not listed stays out')
   assert.deepEqual(
-    chromiumEnv({ BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH: 'X' }),
+    chromiumEnv({ BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH: 'X' }),
     {},
     'a listed name that is not set adds nothing'
   )
@@ -85,10 +85,10 @@ test('chromium command line: DevTools on a pipe, no port; sandbox and headless a
 })
 
 test('finding Chromium: an explicit path wins, then the image’s Playwright directory', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'browserbox-find-'))
+  const root = await mkdtemp(join(tmpdir(), 'browserbay-find-'))
   try {
     assert.equal(
-      findChromium({ BROWSERBOX_CHROMIUM_EXECUTABLE: '/custom/chrome', PLAYWRIGHT_BROWSERS_PATH: root }),
+      findChromium({ BROWSERBAY_CHROMIUM_EXECUTABLE: '/custom/chrome', PLAYWRIGHT_BROWSERS_PATH: root }),
       '/custom/chrome'
     )
     assert.equal(findChromium({ PLAYWRIGHT_BROWSERS_PATH: root }), null, 'nothing installed')

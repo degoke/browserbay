@@ -95,7 +95,7 @@ export function rawSocket(url: string, headers: Record<string, string> = {}) {
 
 /** A plain Chromium with a DevTools port on loopback: what a node wraps, for tests that drive the scope hub directly. */
 export async function launchChromium() {
-  const profile = await mkdtemp(join(tmpdir(), 'browserbox-test-'))
+  const profile = await mkdtemp(join(tmpdir(), 'browserbay-test-'))
   const child: ChildProcess = spawn(
     chromium.executablePath(),
     [

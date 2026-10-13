@@ -1,48 +1,78 @@
-/** Types for protocol.js: the wire contract between the relay, the node agents and the clients. */
+/**
+ * The wire contract between the three parts of browserbay: the relay, the node agents that dial it, and the clients
+ * (your services) that ask it for browsers.
+ *
+ * It has no imports, so the relay, the node and the client all load the same constants and types.
+ *
+ * Three secrets, three jobs:
+ *   - the enrollment secret lets a node join (node <-> relay control socket);
+ *   - the API key lets a client manage slots (REST);
+ *   - the slot token (header below) reaches one slot's browser and nothing else (CDP socket, slot lookup).
+ *
+ * A node holds ONE outbound control socket, and the relay asks it for one more outbound "stream" socket per client
+ * CDP connection, so there is no multiplexing: each stream is a plain WebSocket carrying one client's DevTools
+ * messages, with its own backpressure. Nothing ever connects in to a node.
+ */
 
-export declare const TOKEN_HEADER: 'x-browserbox-token'
+/** Sent by whoever drives or watches a slot's browser, on the CDP socket and on the slot lookup. */
+export const TOKEN_HEADER = 'x-browserbay-token'
 
-export declare const NODE_PROTOCOL_VERSION: 1
+/** Bumped when the node <-> relay messages change incompatibly. The relay refuses a node that speaks another one. */
+export const NODE_PROTOCOL_VERSION = 1
 
-/** Letters, digits, `_`, `.` and `-`: the one rule for a name. */
-export declare const NAME_PATTERN: RegExp
+/**
+ * The one rule for a name (a node's, a namespace's, an enrollment secret's): letters, digits, `_`, `.` and `-`. Kept
+ * here so the relay, the node, the client and the CLI cannot drift apart on it.
+ */
+const NAME_CHARS = '[\\w.-]'
+export const NAME_PATTERN = new RegExp(`^${NAME_CHARS}+$`)
 
-export declare const NODE_LIMITS: {
-  readonly maxContexts: 100
-  readonly nodeIdPattern: RegExp
+/** What the relay accepts in a node's hello. A node that exceeds them is refused (close code 4400). */
+export const NODE_LIMITS = {
+  /** The most slots one node may offer. */
+  maxContexts: 100,
+  /** A node's name, up to 100 characters. Unique per node: a second one with the same name replaces the first. */
+  nodeIdPattern: new RegExp(`^${NAME_CHARS}{1,100}$`)
+} as const
+
+/**
+ * A setting the operator has to fix. The CLI exits with status 2 for it. Recognise it with `instanceof` or by
+ * `name === 'ConfigError'`.
+ */
+export class ConfigError extends Error {
+  override name = 'ConfigError' as const
 }
 
-/** A setting the operator has to fix. Recognise it by `name === 'ConfigError'`. */
-export declare class ConfigError extends Error {
-  name: 'ConfigError'
-}
+/** What the relay accepts when a slot is requested (400 `invalid_request` otherwise). */
+export const SLOT_LIMITS = {
+  minLifetimeSeconds: 60,
+  maxLifetimeSeconds: 86_400,
+  /** `runId` length, in characters. A client's namespace prefix counts. */
+  maxRunIdLength: 200
+} as const
 
-export declare const SLOT_LIMITS: {
-  readonly minLifetimeSeconds: 60
-  readonly maxLifetimeSeconds: 86400
-  readonly maxRunIdLength: 200
-}
+export const RELAY_PATHS = {
+  health: '/health',
+  slots: '/v1/slots',
+  nodes: '/v1/nodes',
+  nodeConnect: '/v1/nodes/connect',
+  slot: (slotId: string) => `/v1/slots/${slotId}`,
+  cdp: (slotId: string) => `/v1/cdp/${slotId}`,
+  nodeStream: (streamId: string) => `/v1/nodes/stream/${streamId}`
+} as const
 
-export declare const RELAY_PATHS: {
-  readonly health: '/health'
-  readonly slots: '/v1/slots'
-  readonly nodes: '/v1/nodes'
-  readonly nodeConnect: '/v1/nodes/connect'
-  readonly slot: (slotId: string) => string
-  readonly cdp: (slotId: string) => string
-  readonly nodeStream: (streamId: string) => string
-}
-
-export declare const CLOSE: {
-  readonly invalidHello: 4400
-  readonly unauthorized: 4401
-  readonly unsupportedVersion: 4426
-  readonly helloTimeout: 4408
-  readonly replaced: 4409
-  readonly nodeTimeout: 4410
-  readonly slowConsumer: 4413
-  readonly nodeUnavailable: 4503
-}
+/** Close codes the relay and nodes use (4000-4999 are application codes; the WHATWG WebSocket a node uses cannot send others). */
+export const CLOSE = {
+  /** An authenticated node whose hello the relay will not accept: an id or a slot count outside NODE_LIMITS. */
+  invalidHello: 4400,
+  unauthorized: 4401,
+  unsupportedVersion: 4426,
+  helloTimeout: 4408,
+  replaced: 4409,
+  nodeTimeout: 4410,
+  slowConsumer: 4413,
+  nodeUnavailable: 4503
+} as const
 
 // ---- REST (API key: `Authorization: Bearer <key>`, except where a slot token is named) ----------------------------
 

@@ -1,5 +1,5 @@
 /**
- * Real-browser check of the scope hub (src/node/scope.mjs): one shared Chromium, one BrowserContext per slot, and
+ * Real-browser check of the scope hub (src/node/scope.ts): one shared Chromium, one BrowserContext per slot, and
  * clients connecting through a virtual browser-level endpoint that shows only that slot.
  * Skipped unless PLAYWRIGHT_BROWSER_TESTS=1 (CI has no Chromium). Run with: pnpm test:browser
  *
@@ -12,7 +12,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
 import { WebSocket, WebSocketServer } from 'ws'
-import { createCdpScope, type CdpScope } from '../src/node/scope.mjs'
+import { createCdpScope, type CdpScope } from '../src/node/scope.js'
 import {
   connect,
   enabled,

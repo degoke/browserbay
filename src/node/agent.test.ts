@@ -3,11 +3,11 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import test from 'node:test'
 import { WebSocket, WebSocketServer } from 'ws'
-import { assertSecureRelayUrl, startAgent, type Agent } from './agent.mjs'
-import { createFakeChromium, type FakeChromium } from './fake-chromium.mjs'
-import { createCdpScope } from './scope.mjs'
+import { assertSecureRelayUrl, startAgent, type Agent } from './agent.js'
+import { createFakeChromium, type FakeChromium } from './fake-chromium.js'
+import { createCdpScope } from './scope.js'
 import { hashToken } from '../relay/registry.js'
-import { RELAY_PATHS, TOKEN_HEADER } from '../protocol.js'
+import { CLOSE, RELAY_PATHS, TOKEN_HEADER } from '../protocol.js'
 import { createRelayServer } from '../relay/server.js'
 
 const API_KEY = 'relay-api-key-0123456789'
@@ -512,8 +512,10 @@ test('agent: an error from one connection attempt is not blamed for a later atte
   /** Attempt 1 fails with an error event then closes; attempt 2 closes (1006) with no error event at all. */
   class ScriptedSocket {
     readyState = 0
+    readonly url: string
     private listeners: Record<string, Array<(event: unknown) => void>> = {}
-    constructor(readonly url: string) {
+    constructor(url: string) {
+      this.url = url
       const attempt = ++attempts
       setTimeout(() => {
         if (attempt === 1) this.emit('error', { message: 'ECONNREFUSED' })
@@ -667,6 +669,49 @@ test('one very large reply does not make the node think a healthy stream is too 
     await until(() => sizes.size === 3, 'all three replies', 10_000)
     assert.ok(sizes.get(1)! > 20_000_000)
     assert.equal(stream.readyState, WebSocket.OPEN, 'the stream was not closed for being slow')
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('a stream whose backlog stays over the cap is closed as a slow consumer', async () => {
+  // Stream sockets report a backlog that never drains; the control socket is left alone.
+  class StuckSocket extends globalThis.WebSocket {
+    override get bufferedAmount() {
+      return this.url.includes('/nodes/stream/') ? 1_000_000 : super.bufferedAmount
+    }
+  }
+  const { relay, agent } = await agentOnFakeRelay({
+    WebSocketImpl: StuckSocket,
+    maxBufferedBytes: 1000,
+    slowConsumerGraceMs: 50
+  })
+  try {
+    relay.send(create('s1'))
+    await until(() => agent.contextCount() === 1, 'the context')
+    relay.send({ t: 'stream.open', streamId: 'st-1', slotId: 's1' })
+    await until(() => relay.streams.has('st-1'), 'the stream')
+    const stream = relay.streams.get('st-1')!
+    const closed = new Promise<number>((resolve) => stream.once('close', (code) => resolve(code)))
+    let replies = 0
+    stream.on('message', () => replies++)
+
+    // Over the cap for the first time: still within the grace period, so it is answered.
+    stream.send(JSON.stringify({ id: 1, method: 'Browser.getVersion' }))
+    await until(() => replies === 1, 'the first reply')
+    await wait(250)
+    // Still over the cap after the grace period: the next reply closes the stream instead of queueing.
+    stream.send(JSON.stringify({ id: 2, method: 'Browser.getVersion' }))
+    let giveUp: NodeJS.Timeout | undefined
+    const outcome = await Promise.race([
+      closed,
+      new Promise((resolve) => (giveUp = setTimeout(() => resolve('still open'), 2000)))
+    ])
+    clearTimeout(giveUp)
+    assert.equal(outcome, CLOSE.slowConsumer, 'the stream was closed as a slow consumer')
+    assert.equal(replies, 1, 'the second reply was not sent')
+    assert.equal(agent.contextCount(), 1, 'the run’s context stays')
   } finally {
     await agent.close()
     await relay.close()

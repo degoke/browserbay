@@ -32,18 +32,49 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
 
-  publish:
+  # The client (and the CLI) as an npm package on GitHub Packages: @<owner>/browserbay, with dist/ already built.
+  package:
     needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: '@${{ github.repository_owner }}'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      # `pnpm publish` runs `prepare`, which builds dist/ before the package is packed. A pre-release (v1.0.0-rc.1) must not become what `latest`
+      # installs. Re-running the workflow (to retry the images, say) skips a version the registry already has.
+      - name: Publish the package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIST_TAG: ${{ contains(github.ref_name, '-') && 'next' || 'latest' }}
+        run: |
+          spec="$(node -p "require('./package.json').name + '@' + require('./package.json').version")"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec is already published"
+          else
+            pnpm publish --no-git-checks --tag "$DIST_TAG"
+          fi
+
+  publish:
+    # The images are released only once the package is, so a tag is never half-released.
+    needs: [ci, package]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           # the box: Chromium included, runs `start` by default (and `node` or `relay` on request)
-          - image: browserbox
+          - image: browserbay
             target: box
           # the relay alone, without Chromium
-          - image: browserbox-relay
+          - image: browserbay-relay
             target: relay
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +88,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          # ghcr.io/<owner>/browserbox and ghcr.io/<owner>/browserbox-relay
+          # ghcr.io/<owner>/browserbay and ghcr.io/<owner>/browserbay-relay
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
             type=semver,pattern={{version}}

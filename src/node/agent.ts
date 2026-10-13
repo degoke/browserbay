@@ -5,43 +5,32 @@
  *   - one long-lived CONTROL socket (wss://relay/v1/nodes/connect): authenticates in its first frame, sends
  *     heartbeats that list the node's contexts, and receives context.create / context.release / stream.open;
  *   - one short-lived STREAM socket (wss://relay/v1/nodes/stream/<id>) per client CDP connection, dialled when the relay
- *     asks for it and bound to that run's virtual browser (scope.mjs). It carries raw DevTools JSON and nothing else.
+ *     asks for it and bound to that run's virtual browser (scope.ts). It carries raw DevTools JSON and nothing else.
  *
  * It owns the leases that stop a crashed client from leaking browsers: every context closes itself after the maximum
  * lifetime the relay gave it, even while the relay is unreachable. Contexts survive a relay outage or restart (a run
  * may be waiting on a person); on reconnect the node lists them in its hello and the relay adopts the ones it knows.
  *
- * Plain Node, no dependencies: it uses Node's built-in WebSocket client.
+ * No dependencies: it uses Node's built-in WebSocket client.
  */
 
-import { CLOSE, NODE_PROTOCOL_VERSION, RELAY_PATHS } from '../protocol.js'
+import { createBacklogGuard } from '../backlog-guard.js'
+import {
+  CLOSE,
+  NODE_PROTOCOL_VERSION,
+  RELAY_PATHS,
+  type NodeContextReport,
+  type NodeToRelay,
+  type RelayToNode
+} from '../protocol.js'
+import type { CdpScope, ScopeClient } from './scope.js'
 
-export { NODE_PROTOCOL_VERSION }
 const OPEN = 1
 
 /** The built-in WebSocket client can only send 1000 or 3000-4999; anything else becomes a generic application code. */
-const sendableCode = (code) => (code === 1000 || (code >= 3000 && code <= 4999) ? code : 4500)
+const sendableCode = (code: number) => (code === 1000 || (code >= 3000 && code <= 4999) ? code : 4500)
 /** A close reason is limited to 123 bytes. */
-const closeReason = (reason) => String(reason ?? '').slice(0, 100)
-
-/**
- * Decides when a connection's consumer is too slow to keep. The question is not "is a lot of data waiting right now":
- * one legitimate message (a full-page screenshot is tens of MB) leaves the buffer high until it drains, and the very
- * next message would then look like an overload. A consumer is too slow when its backlog stays above `maxBytes` for
- * longer than `graceMs`. Call the returned function with the socket's bufferedAmount before each send.
- * (relay/server.ts has the same logic on the relay side: relay/backlog-guard.ts.)
- */
-export function createBacklogGuard({ maxBytes, graceMs, now = Date.now }) {
-  let overSince = null
-  return (bufferedBytes) => {
-    if (bufferedBytes <= maxBytes) {
-      overSince = null
-      return false
-    }
-    overSince ??= now()
-    return now() - overSince > graceMs
-  }
-}
+const closeReason = (reason: unknown) => String(reason ?? '').slice(0, 100)
 
 const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|.*\.localhost)$/
 
@@ -49,13 +38,59 @@ const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|.*\.localhost)$/
  * The enrollment secret travels in the first frame, so the relay must be reached over TLS unless it is on this
  * machine. Throws for a plain ws:// or http:// address anywhere else.
  */
-export function assertSecureRelayUrl(relayUrl) {
+export function assertSecureRelayUrl(relayUrl: string): void {
   const url = new URL(relayUrl)
   const tls = url.protocol === 'https:' || url.protocol === 'wss:'
   const plain = url.protocol === 'http:' || url.protocol === 'ws:'
   if (!tls && !(plain && LOOPBACK.test(url.hostname))) {
     throw new Error('The relay URL must use https (or wss) unless the relay runs on this machine')
   }
+}
+
+export interface AgentLogger {
+  info?(message: string, fields?: Record<string, unknown>): void
+  warn?(message: string, fields?: Record<string, unknown>): void
+}
+
+export interface AgentOptions {
+  /** The relay's base URL (http(s):// or ws(s)://), with any path prefix it is served under. */
+  relayUrl: string
+  enrollmentSecret: string
+  nodeId: string
+  /** A started scope hub in front of this node's Chromium. */
+  scope: CdpScope
+  maxContexts?: number
+  heartbeatMs?: number
+  reconnectMinMs?: number
+  reconnectMaxMs?: number
+  /** A stream whose unsent data stays above this for `slowConsumerGraceMs` is closed: a viewer that cannot keep up must not grow the node's memory. */
+  maxBufferedBytes?: number
+  slowConsumerGraceMs?: number
+  logger?: AgentLogger
+  WebSocketImpl?: typeof WebSocket
+  random?: () => number
+}
+
+export interface Agent {
+  /** Resolves once the relay has accepted this node. */
+  whenConnected(timeoutMs?: number): Promise<void>
+  contextCount(): number
+  contextIds(): string[]
+  isConnected(): boolean
+  /** Stops taking new contexts and waits for the existing ones to end (or `timeoutMs`). */
+  drain(timeoutMs?: number): Promise<void>
+  close(): Promise<void>
+}
+
+/** A context this node holds for a slot: what the relay is told about it, and the timer that ends its lease. */
+interface Context extends NodeContextReport {
+  timer: NodeJS.Timeout
+}
+
+/** A caller of `whenConnected`: settled by the welcome, by `close()`, or by its own timeout. */
+interface ConnectWaiter {
+  resolve(): void
+  reject(error: Error): void
 }
 
 export function startAgent({
@@ -67,46 +102,44 @@ export function startAgent({
   heartbeatMs = 5000,
   reconnectMinMs = 500,
   reconnectMaxMs = 15_000,
-  /** A stream whose unsent data stays above this for `slowConsumerGraceMs` is closed: a viewer that cannot keep up must not grow the node's memory. */
   maxBufferedBytes = 16 * 1024 * 1024,
   slowConsumerGraceMs = 10_000,
   logger = {},
   WebSocketImpl = globalThis.WebSocket,
   random = Math.random
-}) {
-  const log = (level, message, fields) => logger[level]?.(message, fields)
+}: AgentOptions): Agent {
+  const log = (level: keyof AgentLogger, message: string, fields?: Record<string, unknown>) =>
+    logger[level]?.(message, fields)
 
   assertSecureRelayUrl(relayUrl)
   const base = new URL(relayUrl)
   base.protocol = base.protocol === 'https:' || base.protocol === 'wss:' ? 'wss:' : 'ws:'
-  const urlFor = (path) => {
+  const urlFor = (path: string) => {
     const url = new URL(base)
     url.pathname = url.pathname.replace(/\/$/, '') + path
     url.search = ''
     return url.toString()
   }
 
-  /** slotId -> { slotId, runId, tokenHash, createdAt, timer } */
-  const contexts = new Map()
+  const contexts = new Map<string, Context>()
   /** Creates in flight, counted against capacity so two arriving together cannot both take the last slot. */
   let reserved = 0
-  const streams = new Set()
-  let control = null
-  let heartbeatTimer = null
-  let reconnectTimer = null
+  const streams = new Set<WebSocket>()
+  let control: WebSocket | null = null
+  let heartbeatTimer: NodeJS.Timeout | undefined
+  let reconnectTimer: NodeJS.Timeout | undefined
   let attempt = 0
   let draining = false
   let closing = false
   let helloAcknowledged = false
   let lastConnectionError = ''
-  const waiters = new Set()
-  /** Callers of whenConnected: settled by the welcome, by close(), or by their own timeout. */
-  const connectWaiters = new Set()
+  const waiters = new Set<() => void>()
+  const connectWaiters = new Set<ConnectWaiter>()
 
-  const reports = () =>
+  const reports = (): NodeContextReport[] =>
     [...contexts.values()].map(({ slotId, runId, tokenHash, createdAt }) => ({ slotId, runId, tokenHash, createdAt }))
 
-  function sendControl(message) {
+  function sendControl(message: NodeToRelay) {
     if (control?.readyState === OPEN) control.send(JSON.stringify(message))
   }
 
@@ -139,11 +172,12 @@ export function startAgent({
     socket.addEventListener('close', (event) => onControlClosed(socket, event))
     // A failed connection is followed by a close event, which is where it is handled; this only keeps what it said.
     socket.addEventListener('error', (event) => {
-      lastConnectionError = String(event?.message || event?.error?.cause?.code || event?.error?.message || '')
+      const detail = event as { message?: string; error?: { message?: string; cause?: { code?: string } } }
+      lastConnectionError = String(detail.message || detail.error?.cause?.code || detail.error?.message || '')
     })
   }
 
-  function onControlClosed(socket, event) {
+  function onControlClosed(socket: WebSocket, event: { code?: number }) {
     if (socket !== control) return
     const wasConnected = helloAcknowledged
     control = null
@@ -179,8 +213,8 @@ export function startAgent({
     reconnectTimer.unref?.()
   }
 
-  function onControlMessage(data) {
-    let message
+  function onControlMessage(data: unknown) {
+    let message: RelayToNode
     try {
       message = JSON.parse(String(data))
     } catch {
@@ -213,7 +247,13 @@ export function startAgent({
 
   // ---- contexts ---------------------------------------------------------------------------------------------
 
-  async function createContext({ reqId, slotId, runId, tokenHash, maxLifetimeSeconds }) {
+  async function createContext({
+    reqId,
+    slotId,
+    runId,
+    tokenHash,
+    maxLifetimeSeconds
+  }: Extract<RelayToNode, { t: 'context.create' }>) {
     if (draining) return sendControl({ t: 'context.failed', reqId, message: 'This node is draining' })
     if (contexts.size + reserved >= maxContexts) {
       return sendControl({ t: 'context.failed', reqId, message: 'This node is full' })
@@ -234,7 +274,7 @@ export function startAgent({
     }
   }
 
-  async function releaseContext(slotId, reason) {
+  async function releaseContext(slotId: string, reason: string) {
     const context = contexts.get(slotId)
     if (!context) return
     clearTimeout(context.timer)
@@ -249,15 +289,15 @@ export function startAgent({
 
   // ---- streams ----------------------------------------------------------------------------------------------
 
-  function openStream({ streamId, slotId }) {
+  function openStream({ streamId, slotId }: Extract<RelayToNode, { t: 'stream.open' }>) {
     if (!contexts.has(slotId)) {
       return sendControl({ t: 'stream.failed', streamId, message: 'No such context on this node' })
     }
     const socket = new WebSocketImpl(urlFor(RELAY_PATHS.nodeStream(streamId)))
     streams.add(socket)
-    let client = null
+    let client: ScopeClient | null = null
     const tooSlow = createBacklogGuard({ maxBytes: maxBufferedBytes, graceMs: slowConsumerGraceMs })
-    const end = (code, reason) => {
+    const end = (code: number, reason?: string) => {
       if (socket.readyState === OPEN) socket.close(sendableCode(code), closeReason(reason))
     }
     socket.addEventListener('open', () => {
@@ -296,16 +336,15 @@ export function startAgent({
   connect()
 
   return {
-    /** Resolves once the relay has accepted this node. */
     whenConnected(timeoutMs = 10_000) {
       if (helloAcknowledged) return Promise.resolve()
-      return new Promise((resolve, reject) => {
-        const settle = (finish) => {
+      return new Promise<void>((resolve, reject) => {
+        const settle = (finish: () => void) => {
           clearTimeout(timer)
           connectWaiters.delete(waiter)
           finish()
         }
-        const waiter = { resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) }
+        const waiter: ConnectWaiter = { resolve: () => settle(resolve), reject: (error) => settle(() => reject(error)) }
         const timer = setTimeout(
           () => waiter.reject(new Error('The relay did not accept this node in time')),
           timeoutMs
@@ -317,12 +356,11 @@ export function startAgent({
     contextCount: () => contexts.size,
     contextIds: () => [...contexts.keys()],
     isConnected: () => helloAcknowledged,
-    /** Stops taking new contexts and waits for the existing ones to end (or `timeoutMs`). */
     async drain(timeoutMs = 120_000) {
       draining = true
       sendHeartbeat()
       if (contexts.size === 0 && reserved === 0) return
-      await new Promise((resolve) => {
+      await new Promise<void>((resolve) => {
         const timer = setTimeout(done, timeoutMs)
         function done() {
           clearTimeout(timer)

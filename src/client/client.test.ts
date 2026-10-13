@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TOKEN_HEADER } from '../protocol.js'
-import { BrowserBoxError, NoCapacityError, createBrowserBox, type BrowserBoxOptions } from './index.js'
+import { BrowserBayError, NoCapacityError, createBrowserBay, type BrowserBayOptions } from './index.js'
 
 const API_KEY = 'box-api-key-0123456789'
 const BOX = 'https://browsers.example.com'
@@ -128,8 +128,8 @@ function fakeBox(
   return { impl, calls, slots, seed, lookups, deleted }
 }
 
-function client(fetchImpl: typeof fetch, options: Partial<BrowserBoxOptions> = {}) {
-  return createBrowserBox({ url: BOX, apiKey: API_KEY, fetch: fetchImpl, now: () => NOW, retryDelayMs: 0, ...options })
+function client(fetchImpl: typeof fetch, options: Partial<BrowserBayOptions> = {}) {
+  return createBrowserBay({ url: BOX, apiKey: API_KEY, fetch: fetchImpl, now: () => NOW, retryDelayMs: 0, ...options })
 }
 
 const acquireOptions = (runId: string, extra: { waitMs?: number } = {}) => ({
@@ -147,16 +147,16 @@ function recorder() {
 }
 
 test('client: refuses an address or key it cannot use, up front', () => {
-  assert.throws(() => createBrowserBox({ url: 'not a url', apiKey: API_KEY }), /not a URL/)
-  assert.throws(() => createBrowserBox({ url: 'ftp://browsers.example.com', apiKey: API_KEY }), /http\(s\)/)
-  assert.throws(() => createBrowserBox({ url: BOX, apiKey: '' }), /apiKey/)
+  assert.throws(() => createBrowserBay({ url: 'not a url', apiKey: API_KEY }), /not a URL/)
+  assert.throws(() => createBrowserBay({ url: 'ftp://browsers.example.com', apiKey: API_KEY }), /http\(s\)/)
+  assert.throws(() => createBrowserBay({ url: BOX, apiKey: '' }), /apiKey/)
 })
 
 test('client: refuses a namespace that could be mistaken for another, a bad run id, and a lifetime the box would refuse', async () => {
   for (const namespace of ['app:staging', 'has space', 'a/b', 'é']) {
-    assert.throws(() => createBrowserBox({ url: BOX, apiKey: API_KEY, namespace }), /namespace/, namespace)
+    assert.throws(() => createBrowserBay({ url: BOX, apiKey: API_KEY, namespace }), /namespace/, namespace)
   }
-  for (const namespace of ['production', 'eu-west_1.app']) createBrowserBox({ url: BOX, apiKey: API_KEY, namespace })
+  for (const namespace of ['production', 'eu-west_1.app']) createBrowserBay({ url: BOX, apiKey: API_KEY, namespace })
   // An empty namespace is no namespace (as `namespace: process.env.NS ?? ''` would mean), not an error.
   const unnamespaced = fakeBox()
   await client(unnamespaced.impl, { namespace: '' }).acquire(acquireOptions('plain'))
@@ -243,7 +243,7 @@ test('client: a full box is a NoCapacityError; other failures carry the status a
     () => client(fakeBox({ createStatus: 503 }).impl).acquire(acquireOptions('r')),
     (error: unknown) => {
       assert.ok(error instanceof NoCapacityError)
-      assert.ok(error instanceof BrowserBoxError)
+      assert.ok(error instanceof BrowserBayError)
       assert.equal(error.status, 503)
       assert.equal(error.message, 'No browser capacity is available right now')
       return true
@@ -252,7 +252,7 @@ test('client: a full box is a NoCapacityError; other failures carry the status a
   await assert.rejects(
     () => client(fakeBox({ createStatus: 401 }).impl).acquire(acquireOptions('r')),
     (error: unknown) => {
-      assert.ok(error instanceof BrowserBoxError && !(error instanceof NoCapacityError))
+      assert.ok(error instanceof BrowserBayError && !(error instanceof NoCapacityError))
       assert.equal(error.status, 401)
       assert.match(error.message, /could not start a browser \(401\)/)
       assert.ok(!error.message.includes(API_KEY))
@@ -451,7 +451,7 @@ test('client: releasing is idempotent, a slot that is already gone is fine, and 
           .slot(slot.toJSON())
           .release(),
       (error: unknown) => {
-        assert.ok(error instanceof BrowserBoxError)
+        assert.ok(error instanceof BrowserBayError)
         assert.equal(error.status, status)
         assert.ok(!error.message.includes(API_KEY) && !error.message.includes(slot.token), 'no secret in the message')
         return true
@@ -481,7 +481,7 @@ test('client: list shows this service’s slots, and with a namespace only that 
   await assert.rejects(() => client(fakeBox({ listStatus: 500 }).impl).list(), /could not list browsers \(500\)/)
   await assert.rejects(
     () => client(fakeBox({ listStatus: 401 }).impl).list(),
-    (error: unknown) => (error as BrowserBoxError).status === 401
+    (error: unknown) => (error as BrowserBayError).status === 401
   )
 })
 
@@ -644,7 +644,7 @@ test('client: a slot can be released by its id alone, at the box named, and fail
   await client(fakeBox({ deleteStatus: () => 404 }).impl).release('already-gone')
   await assert.rejects(
     () => client(fakeBox({ deleteStatus: () => 500 }).impl).release('stuck'),
-    (error: unknown) => error instanceof BrowserBoxError && error.status === 500
+    (error: unknown) => error instanceof BrowserBayError && error.status === 500
   )
   await assert.rejects(() => client(box.impl).release(''), /needs a slotId/)
   await assert.rejects(() => client(box.impl).release('x', { url: 'ftp://nope' }), /http\(s\)/)

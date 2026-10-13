@@ -3,9 +3,12 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { parseNodeEnv } from './node/main.js'
+import { parseEnrollmentSecrets } from './relay/config.js'
 
-const CLI = fileURLToPath(new URL('../bin/browserbox.mjs', import.meta.url))
-const cli = (args, env = {}) =>
+// The built CLI, as `bin` runs it: `pnpm test` builds first.
+const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
+const cli = (args: string[], env: Record<string, string> = {}) =>
   spawnSync(process.execPath, [CLI, ...args], { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' })
 
 test('cli: `key` makes a different key each time, long enough for the relay', () => {
@@ -15,14 +18,12 @@ test('cli: `key` makes a different key each time, long enough for the relay', ()
   assert.notEqual(a.stdout, b.stdout)
 })
 
-test('cli: `secret` prints a pair the node and the relay both accept, and that match each other', async () => {
+test('cli: `secret` prints a pair the node and the relay both accept, and that match each other', () => {
   const out = cli(['secret', 'edge']).stdout
-  const secret = /BROWSERBOX_ENROLLMENT_SECRET=(\S+)/.exec(out)?.[1]
-  const entry = /BROWSERBOX_ENROLLMENT_SECRETS=(\S+)/.exec(out)?.[1]
+  const secret = /BROWSERBAY_ENROLLMENT_SECRET=(\S+)/.exec(out)?.[1]
+  const entry = /BROWSERBAY_ENROLLMENT_SECRETS=(\S+)/.exec(out)?.[1]
   assert.ok(secret && entry, out)
 
-  const { parseEnrollmentSecrets } = await import('../dist/relay/config.js')
-  const { parseNodeEnv } = await import('./node/main.mjs')
   const [parsed] = parseEnrollmentSecrets(entry)
   assert.equal(parsed.id, 'edge', 'the name given on the command line')
   assert.equal(
@@ -31,7 +32,7 @@ test('cli: `secret` prints a pair the node and the relay both accept, and that m
     'the relay holds the hash of the secret'
   )
   assert.equal(
-    parseNodeEnv({ BROWSERBOX_RELAY_URL: 'https://r.example.com', BROWSERBOX_ENROLLMENT_SECRET: secret })
+    parseNodeEnv({ BROWSERBAY_RELAY_URL: 'https://r.example.com', BROWSERBAY_ENROLLMENT_SECRET: secret })
       .enrollmentSecret,
     secret,
     'and the node accepts the secret as printed'
@@ -58,20 +59,20 @@ test('cli: help, and an unknown command is an error that shows the help', () => 
   const unknown = cli(['bogus'])
   assert.equal(unknown.status, 2)
   assert.match(unknown.stderr, /Unknown command: bogus/)
-  assert.match(unknown.stderr, /browserbox start/)
+  assert.match(unknown.stderr, /browserbay start/)
 })
 
 test('cli: a bad setting is a sentence and a non-zero exit, never a stack trace', () => {
   const relay = cli(['relay'])
   assert.equal(relay.status, 2)
-  assert.match(relay.stderr, /Invalid relay configuration: BROWSERBOX_API_KEY/)
+  assert.match(relay.stderr, /Invalid relay configuration: BROWSERBAY_API_KEY/)
   assert.doesNotMatch(relay.stderr, /\n\s+at /, 'no stack')
 
-  const box = cli(['start'], { BROWSERBOX_API_KEY: 'short' })
+  const box = cli(['start'], { BROWSERBAY_API_KEY: 'short' })
   assert.equal(box.status, 2)
-  assert.match(box.stderr, /Invalid configuration: BROWSERBOX_API_KEY/)
+  assert.match(box.stderr, /Invalid configuration: BROWSERBAY_API_KEY/)
 
   const node = cli(['node'])
   assert.equal(node.status, 2)
-  assert.match(node.stderr, /BROWSERBOX_RELAY_URL and BROWSERBOX_ENROLLMENT_SECRET/)
+  assert.match(node.stderr, /BROWSERBAY_RELAY_URL and BROWSERBAY_ENROLLMENT_SECRET/)
 })

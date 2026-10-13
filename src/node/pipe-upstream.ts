@@ -8,19 +8,29 @@
  * is; a pipe has no framing to go wrong, at any size. And there is no DevTools port at all, on loopback or anywhere
  * else, so nothing on the machine (a page, another process) can reach the browser's debugging interface but this one.
  *
- * Plain Node, no dependencies.
  */
+import type { Readable, Writable } from 'node:stream'
 
 /**
  * `input` is the stream Chromium writes to (fd 4 of the child) and `output` the one it reads from (fd 3). Calls
  * `onMessage` with each complete message, and `onClose` once when the browser's end goes away.
  */
-export function createPipeUpstream({ input, output, onMessage, onClose }) {
+export function createPipeUpstream({
+  input,
+  output,
+  onMessage,
+  onClose
+}: {
+  input: Readable
+  output: Writable
+  onMessage: (text: string) => void
+  onClose: () => void
+}) {
   /** The pieces of the message being received. Nothing is joined, or decoded, until its NUL arrives. */
-  const parts = []
+  const parts: Buffer[] = []
   let closed = false
 
-  input.on('data', (chunk) => {
+  input.on('data', (chunk: Buffer) => {
     let start = 0
     for (;;) {
       const end = chunk.indexOf(0, start)
@@ -49,7 +59,7 @@ export function createPipeUpstream({ input, output, onMessage, onClose }) {
   output.on('error', () => undefined)
 
   return {
-    send(text) {
+    send(text: string) {
       if (!closed) output.write(`${text}\0`)
     }
   }

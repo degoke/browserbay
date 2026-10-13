@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": false, "rootDir": "src", "outDir": "dist" },
-  "include": ["src/relay", "src/protocol.d.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "compilerOptions": { "noEmit": false, "rootDir": "src", "outDir": "dist", "declaration": true },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/node/fake-chromium.ts"]
 }

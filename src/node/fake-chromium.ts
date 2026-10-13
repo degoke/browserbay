@@ -1,5 +1,5 @@
 /**
- * An in-memory stand-in for Chromium's browser-level DevTools endpoint, enough to test scope.mjs without a browser.
+ * An in-memory stand-in for Chromium's browser-level DevTools endpoint, enough to test scope.ts without a browser.
  * Not shipped in the image. It mirrors the behaviour the hub depends on, as observed against a real Chromium by
  * test/scope.browser.test.ts (run it when changing either):
  *
@@ -14,35 +14,73 @@
 
 const DEFAULT_CONTEXT = 'default-context'
 
+type Params = Record<string, any>
+
+export interface FakeTarget {
+  targetId: string
+  type: string
+  url: string
+  browserContextId: string
+  openerId?: string
+}
+
+export interface FakeSession {
+  sessionId: string
+  targetId: string
+  parent?: string
+  paused: boolean
+  fetchEnabled: boolean
+  childAutoAttach: unknown
+}
+
+export interface FakeCommand {
+  method: string
+  params?: Params
+  sessionId?: string
+}
+
+/** A command as it arrives from the hub. */
+interface Command extends FakeCommand {
+  id: number
+}
+
+interface FakeContext {
+  cookies: unknown[]
+  disposeOnDetach?: boolean
+}
+
+/** The in-memory Chromium used to test scope.ts and agent.ts without a browser. */
+export type FakeChromium = ReturnType<typeof createFakeChromium>
+
 export function createFakeChromium() {
   let seq = 0
-  const next = (prefix) => `${prefix}-${++seq}`
-  const contexts = new Map([[DEFAULT_CONTEXT, { cookies: [] }]])
-  const targets = new Map()
-  const sessions = new Map()
+  const next = (prefix: string) => `${prefix}-${++seq}`
+  const contexts = new Map<string, FakeContext>([[DEFAULT_CONTEXT, { cookies: [] }]])
+  const targets = new Map<string, FakeTarget>()
+  const sessions = new Map<string, FakeSession>()
   /** Every command the browser received, in order. */
-  const log = []
+  const log: FakeCommand[] = []
   /** targetId -> window id, handed out the way Chromium numbers windows: browser-wide small integers. */
-  const windows = new Map()
-  let autoAttach = null
+  const windows = new Map<string, number>()
+  let autoAttach: Params | null = null
   let discover = false
-  let deliver = () => undefined
+  let deliver: (text: string) => void = () => undefined
   let closed = false
 
-  const emit = (method, params, sessionId) => {
+  const emit = (method: string, params: unknown, sessionId?: string) => {
     const text = JSON.stringify({ method, params, ...(sessionId ? { sessionId } : {}) })
     queueMicrotask(() => deliver(text))
   }
-  const reply = (id, result, sessionId) => {
+  const reply = (id: number, result: unknown, sessionId?: string) => {
     const text = JSON.stringify({ id, result, ...(sessionId ? { sessionId } : {}) })
     queueMicrotask(() => deliver(text))
   }
-  const fail = (id, code, message, sessionId) => {
+  const fail = (id: number, code: number, message: string, sessionId?: string) => {
     const text = JSON.stringify({ id, error: { code, message }, ...(sessionId ? { sessionId } : {}) })
     queueMicrotask(() => deliver(text))
   }
 
-  const info = (target) => ({
+  const info = (target: FakeTarget) => ({
     targetId: target.targetId,
     type: target.type,
     title: '',
@@ -52,15 +90,20 @@ export function createFakeChromium() {
     ...(target.openerId ? { openerId: target.openerId } : {})
   })
 
-  function attachSession(targetId, { paused = false, parent } = {}) {
+  function attachSession(targetId: string, { paused = false, parent }: { paused?: boolean; parent?: string } = {}) {
     const sessionId = next('session')
     sessions.set(sessionId, { sessionId, targetId, parent, paused, fetchEnabled: false, childAutoAttach: null })
     return sessionId
   }
 
-  function createTarget({ url = 'about:blank', browserContextId = DEFAULT_CONTEXT, type = 'page', openerId } = {}) {
+  function createTarget({
+    url = 'about:blank',
+    browserContextId = DEFAULT_CONTEXT,
+    type = 'page',
+    openerId
+  }: { url?: string; browserContextId?: string; type?: string; openerId?: string } = {}) {
     const targetId = next('target')
-    const target = { targetId, type, url, browserContextId, openerId }
+    const target: FakeTarget = { targetId, type, url, browserContextId, openerId }
     targets.set(targetId, target)
     if (discover) emit('Target.targetCreated', { targetInfo: info(target) })
     if (autoAttach) {
@@ -71,7 +114,7 @@ export function createFakeChromium() {
     return targetId
   }
 
-  function detach(sessionId) {
+  function detach(sessionId: string): boolean {
     const session = sessions.get(sessionId)
     if (!session) return false
     for (const child of [...sessions.values()]) if (child.parent === sessionId) detach(child.sessionId)
@@ -80,13 +123,13 @@ export function createFakeChromium() {
     return true
   }
 
-  function closeTarget(targetId) {
+  function closeTarget(targetId: string) {
     for (const session of [...sessions.values()]) if (session.targetId === targetId) detach(session.sessionId)
     targets.delete(targetId)
     if (discover) emit('Target.targetDestroyed', { targetId })
   }
 
-  function receiveBrowser({ id, method, params = {} }) {
+  function receiveBrowser({ id, method, params = {} }: Command) {
     const context = () => contexts.get(params.browserContextId ?? DEFAULT_CONTEXT)
     switch (method) {
       case 'Browser.getVersion':
@@ -148,9 +191,11 @@ export function createFakeChromium() {
       case 'Storage.setCookies':
         context()?.cookies.push(...(params.cookies ?? []))
         return reply(id, {})
-      case 'Storage.clearCookies':
-        if (context()) context().cookies.length = 0
+      case 'Storage.clearCookies': {
+        const current = context()
+        if (current) current.cookies.length = 0
         return reply(id, {})
+      }
       case 'Browser.close':
         closed = true
         return reply(id, {})
@@ -164,7 +209,7 @@ export function createFakeChromium() {
     }
   }
 
-  function receiveSession({ id, method, params = {}, sessionId }) {
+  function receiveSession({ id, method, params = {}, sessionId }: Command & { sessionId: string }) {
     const session = sessions.get(sessionId)
     if (!session) return fail(id, -32001, 'Session with given id not found.', sessionId)
     switch (method) {
@@ -198,14 +243,14 @@ export function createFakeChromium() {
 
   return {
     /** The browser's side of the connection: what the hub sends upstream. */
-    receive(text) {
-      const message = JSON.parse(text)
+    receive(text: string) {
+      const message: Command = JSON.parse(text)
       log.push({ method: message.method, params: message.params, sessionId: message.sessionId })
-      if (message.sessionId !== undefined) receiveSession(message)
+      if (message.sessionId !== undefined) receiveSession(message as Command & { sessionId: string })
       else receiveBrowser(message)
     },
     /** Where the browser's answers and events go: the hub's onUpstreamMessage. */
-    onMessage(handler) {
+    onMessage(handler: (text: string) => void) {
       deliver = handler
     },
     contexts,
@@ -214,24 +259,25 @@ export function createFakeChromium() {
     log,
     DEFAULT_CONTEXT,
     wasClosed: () => closed,
-    commands: (method) => log.filter((entry) => entry.method === method),
-    cookies: (contextId = DEFAULT_CONTEXT) => contexts.get(contextId)?.cookies ?? [],
-    sessionsOf: (targetId) =>
+    commands: (method: string) => log.filter((entry) => entry.method === method),
+    cookies: (contextId: string = DEFAULT_CONTEXT) => contexts.get(contextId)?.cookies ?? [],
+    sessionsOf: (targetId: string) =>
       [...sessions.values()].filter((session) => session.targetId === targetId).map((s) => s.sessionId),
-    isPaused: (targetId) => [...sessions.values()].some((session) => session.targetId === targetId && session.paused),
+    isPaused: (targetId: string) =>
+      [...sessions.values()].some((session) => session.targetId === targetId && session.paused),
     /** A tab that appears by itself (the default-context page, or a tab another client made). */
     createTarget,
     /** A page script calling window.open: a new tab in the opener's context. */
-    openPopup(sessionId) {
-      const opener = targets.get(sessions.get(sessionId).targetId)
+    openPopup(sessionId: string) {
+      const opener = targets.get(sessions.get(sessionId)!.targetId)!
       return createTarget({ url: 'about:blank', browserContextId: opener.browserContextId, openerId: opener.targetId })
     },
     /** A frame or worker attached under a page session that asked for auto-attach. Announced on the parent session. */
-    addChildSession(parentSessionId, { type = 'iframe' } = {}) {
-      const parent = sessions.get(parentSessionId)
-      const owner = targets.get(parent.targetId)
+    addChildSession(parentSessionId: string, { type = 'iframe' }: { type?: string } = {}) {
+      const parent = sessions.get(parentSessionId)!
+      const owner = targets.get(parent.targetId)!
       const targetId = next('target')
-      const target = { targetId, type, url: 'about:blank', browserContextId: owner.browserContextId }
+      const target: FakeTarget = { targetId, type, url: 'about:blank', browserContextId: owner.browserContextId }
       targets.set(targetId, target)
       const sessionId = attachSession(targetId, { paused: true, parent: parentSessionId })
       emit(
@@ -241,8 +287,8 @@ export function createFakeChromium() {
       )
       return sessionId
     },
-    emitSessionEvent: (sessionId, method, params) => emit(method, params, sessionId),
+    emitSessionEvent: (sessionId: string, method: string, params?: unknown) => emit(method, params, sessionId),
     /** Lets everything queued so far be delivered, however many hops it takes. */
-    flush: () => new Promise((resolve) => setImmediate(resolve))
+    flush: () => new Promise<void>((resolve) => setImmediate(resolve))
   }
 }

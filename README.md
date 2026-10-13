@@ -1,4 +1,4 @@
-# browserbox
+# browserbay
 
 Browsers for AI agents and automation, as a service you deploy once and point any project at.
 
@@ -18,29 +18,50 @@ your service C ─┘    auth + scheduling     └─ node (another machine, beh
 ## Quick start
 
 ```sh
-export BROWSERBOX_API_KEY="$(openssl rand -base64 24)"   # keep it: your projects present it
-docker run -d --name browserbox --restart always --init --stop-timeout 130 \
-  -p 127.0.0.1:8788:8788 -e BROWSERBOX_API_KEY \
-  ghcr.io/degoke/browserbox
+export BROWSERBAY_API_KEY="$(openssl rand -base64 24)"   # keep it: your projects present it
+docker run -d --name browserbay --restart always --init --stop-timeout 130 \
+  -p 127.0.0.1:8788:8788 -e BROWSERBAY_API_KEY \
+  ghcr.io/degoke/browserbay
 ```
 
 That one container is a complete box: the relay and a Chromium node together. It listens on this machine only (`127.0.0.1`). Put it behind HTTPS (your platform's proxy, Caddy, a tunnel) before anything outside the machine talks to it: the API key and slot tokens travel to it. (`--stop-timeout 130` is the 120 s a stopping node gives slots in use, plus a margin.)
 
-Or with Compose, from a checkout: `export BROWSERBOX_API_KEY=$(openssl rand -base64 24)`, then `docker compose up -d`.
+Or with Compose, from a checkout: `export BROWSERBAY_API_KEY=$(openssl rand -base64 24)`, then `docker compose up -d`.
 
 ### Use it from Node
 
-```sh
-pnpm add github:degoke/browserbox#v0.1.0
+The client is published as `@degoke/browserbay` on [GitHub Packages](https://github.com/degoke/browserbay/pkgs/npm/browserbay), already built. GitHub's npm registry needs the scope pointed at it and a personal access token with `read:packages`, even for a public package. Point the scope at it in your project's `.npmrc`:
+
+```ini
+@degoke:registry=https://npm.pkg.github.com
 ```
 
-If you install it inside a Docker build, pin a **commit** instead of the tag (`github:degoke/browserbox#<commit>`): a tag is looked up with `git ls-remote`, which a slim Node image does not have, and a full commit hash needs no lookup (and cannot be moved). The repository is public, so no credentials are needed either way.
+and keep the token in your user-level `~/.npmrc` (not in the project, so it is never committed and nothing breaks where it is absent):
+
+```ini
+//npm.pkg.github.com/:_authToken=<your token>
+```
+
+```sh
+pnpm add @degoke/browserbay
+```
+
+In a Docker build, hand the token to the install step as a BuildKit secret, so it never lands in an image layer:
+
+```dockerfile
+RUN --mount=type=secret,id=npm_token \
+    printf '@degoke:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\n' "$(cat /run/secrets/npm_token)" > ~/.npmrc \
+    && pnpm install --frozen-lockfile \
+    && rm -f ~/.npmrc
+```
+
+with `docker build --secret id=npm_token,env=GITHUB_TOKEN .`.
 
 ```js
 import { chromium } from 'playwright'
-import { createBrowserBox } from 'browserbox/client'
+import { createBrowserBay } from '@degoke/browserbay/client'
 
-const box = createBrowserBox({ url: 'https://browsers.example.com', apiKey: process.env.BROWSERBOX_API_KEY })
+const box = createBrowserBay({ url: 'https://browsers.example.com', apiKey: process.env.BROWSERBAY_API_KEY })
 
 const slot = await box.acquire({ runId: 'task-42', maxLifetimeSeconds: 30 * 60 })
 try {
@@ -58,22 +79,22 @@ try {
 
 ### Use it from anything else
 
-The client is a thin wrapper over a small HTTP and WebSocket API (types in [`src/protocol.d.ts`](src/protocol.d.ts)):
+The client is a thin wrapper over a small HTTP and WebSocket API (types in [`src/protocol.ts`](src/protocol.ts)):
 
 | Call                                                      | Auth                          | Does                                                                                                                                                                                                                                                                                                 |
 | --------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /v1/slots` `{ runId, maxLifetimeSeconds, waitMs? }` | `Authorization: Bearer <key>` | Takes a browser. `201 { slotId, token, nodeId }` (token shown once), `503 no_capacity`. `400` for a bad body: `runId` 1 to 200 characters, `maxLifetimeSeconds` 60 to 86400. `waitMs` defaults to 0 here (the client's default is 30 s) and is capped at the box's `BROWSERBOX_MAX_ACQUIRE_WAIT_MS`. |
+| `POST /v1/slots` `{ runId, maxLifetimeSeconds, waitMs? }` | `Authorization: Bearer <key>` | Takes a browser. `201 { slotId, token, nodeId }` (token shown once), `503 no_capacity`. `400` for a bad body: `runId` 1 to 200 characters, `maxLifetimeSeconds` 60 to 86400. `waitMs` defaults to 0 here (the client's default is 30 s) and is capped at the box's `BROWSERBAY_MAX_ACQUIRE_WAIT_MS`. |
 | `GET /v1/slots`                                           | API key                       | Lists slots (no tokens).                                                                                                                                                                                                                                                                             |
 | `DELETE /v1/slots/:id`                                    | API key                       | Releases a browser. Idempotent, `204`.                                                                                                                                                                                                                                                               |
 | `GET /v1/nodes`                                           | API key                       | Lists nodes, their capacity and load.                                                                                                                                                                                                                                                                |
-| `GET /v1/slots/:id`                                       | `x-browserbox-token: <token>` | `200` while the slot's browser is reachable, `404` when gone, `503` while its node reconnects.                                                                                                                                                                                                       |
-| `WS /v1/cdp/:id`                                          | `x-browserbox-token: <token>` | The slot's DevTools endpoint.                                                                                                                                                                                                                                                                        |
+| `GET /v1/slots/:id`                                       | `x-browserbay-token: <token>` | `200` while the slot's browser is reachable, `404` when gone, `503` while its node reconnects.                                                                                                                                                                                                       |
+| `WS /v1/cdp/:id`                                          | `x-browserbay-token: <token>` | The slot's DevTools endpoint.                                                                                                                                                                                                                                                                        |
 | `GET /health`                                             | none                          | `200` when the relay is up. It does not say a node has joined: look at `GET /v1/nodes`.                                                                                                                                                                                                              |
 
 ### The client
 
 ```js
-const box = createBrowserBox({ url, apiKey, namespace?, allowOtherBoxes?: string[] | true, logger?, fetch?, now? })
+const box = createBrowserBay({ url, apiKey, namespace?, allowOtherBoxes?: string[] | true, logger?, fetch?, now? })
 
 box.acquire({ runId, maxLifetimeSeconds, waitMs? })  // → Slot
 box.slot(stored)                                      // a Slot from what you saved earlier; makes no request
@@ -94,17 +115,17 @@ JSON.stringify(slot)   // what to save to come back to this browser later (it co
 
 ## Deploy
 
-### All-in-one (`browserbox start`, the default command)
+### All-in-one (`browserbay start`, the default command)
 
 | Variable                         | Default | Meaning                                                                             |
 | -------------------------------- | ------- | ----------------------------------------------------------------------------------- |
-| `BROWSERBOX_API_KEY`             | —       | **Required**, at least 16 characters. `openssl rand -base64 24` makes one.          |
+| `BROWSERBAY_API_KEY`             | —       | **Required**, at least 16 characters. `openssl rand -base64 24` makes one.          |
 | `PORT`                           | `8788`  | Where the relay listens.                                                            |
-| `BROWSERBOX_MAX_CONTEXTS`        | `5`     | Concurrent slots. Size it to the machine's memory, and measure with your own pages. |
-| `BROWSERBOX_MAX_ACQUIRE_WAIT_MS` | `60000` | The longest a client may wait for a free slot, whatever it asks for.                |
-| `BROWSERBOX_ENROLLMENT_SECRETS`  | —       | Optional: `name:sha256` entries that let remote nodes join this box (below).        |
+| `BROWSERBAY_MAX_CONTEXTS`        | `5`     | Concurrent slots. Size it to the machine's memory, and measure with your own pages. |
+| `BROWSERBAY_MAX_ACQUIRE_WAIT_MS` | `60000` | The longest a client may wait for a free slot, whatever it asks for.                |
+| `BROWSERBAY_ENROLLMENT_SECRETS`  | —       | Optional: `name:sha256` entries that let remote nodes join this box (below).        |
 
-Plus the node settings listed under the split deployment below (`BROWSERBOX_NODE_ID`, `BROWSERBOX_CHROMIUM_SANDBOX`, …). Give the container a restart policy of "always": the process leaves when Chromium does, and comes back with an empty box. `docker stop` and Compose give a container 10 seconds by default, less than the 120 a node waits for slots in use, so set `--stop-timeout` (Compose: `stop_grace_period`) to match `BROWSERBOX_DRAIN_SECONDS` plus a margin.
+Plus the node settings listed under the split deployment below (`BROWSERBAY_NODE_ID`, `BROWSERBAY_CHROMIUM_SANDBOX`, …). Give the container a restart policy of "always": the process leaves when Chromium does, and comes back with an empty box. `docker stop` and Compose give a container 10 seconds by default, less than the 120 a node waits for slots in use, so set `--stop-timeout` (Compose: `stop_grace_period`) to match `BROWSERBAY_DRAIN_SECONDS` plus a margin.
 
 ### Split: a relay and nodes
 
@@ -113,48 +134,48 @@ When you want browsers on several machines, run **one relay** and any number of 
 1. **Make the secrets.** One enrollment secret per node (or per group), and an API key:
 
    ```sh
-   docker run --rm ghcr.io/degoke/browserbox secret laptop   # the secret for the node, and the `name:sha256` entry for the relay
+   docker run --rm ghcr.io/degoke/browserbay secret laptop   # the secret for the node, and the `name:sha256` entry for the relay
    openssl rand -base64 24                                   # the API key
    ```
 
-   (From a checkout, `node bin/browserbox.mjs secret laptop` and `node bin/browserbox.mjs key` do the same. Do not use `npx browserbox`: that name on npm is an unrelated package.) The node gets the secret; the relay gets only its hash.
+   (From a checkout, `node dist/cli.js secret laptop` and `node dist/cli.js key` (after `pnpm build`) do the same. Do not use `npx browserbay`: this project is only published as `@degoke/browserbay` on GitHub Packages, so an unscoped `browserbay` from npmjs is not it.) The node gets the secret; the relay gets only its hash.
 
 2. **Run the relay** (the `relay` image: no Chromium, about 230 MB). Exactly **one replica**: the nodes' sockets live in that process. Serve it over HTTPS with WebSocket support, at the root of its own hostname (or behind a proxy that strips a path prefix).
 
    ```sh
    docker run -d --restart always -p 8788:8788 \
-     -e BROWSERBOX_API_KEY=... -e BROWSERBOX_ENROLLMENT_SECRETS=laptop:<sha256> \
-     ghcr.io/degoke/browserbox-relay
+     -e BROWSERBAY_API_KEY=... -e BROWSERBAY_ENROLLMENT_SECRETS=laptop:<sha256> \
+     ghcr.io/degoke/browserbay-relay
    ```
 
-3. **Run nodes** anywhere, from the `browserbox` image with the command `node`. A node needs no inbound port.
+3. **Run nodes** anywhere, from the `browserbay` image with the command `node`. A node needs no inbound port.
 
    ```sh
    docker run -d --restart always --init --stop-timeout 130 \
-     -e BROWSERBOX_RELAY_URL=https://browsers.example.com -e BROWSERBOX_ENROLLMENT_SECRET=... \
-     ghcr.io/degoke/browserbox node
+     -e BROWSERBAY_RELAY_URL=https://browsers.example.com -e BROWSERBAY_ENROLLMENT_SECRET=... \
+     ghcr.io/degoke/browserbay node
    ```
 
    | Variable                              | Default          | Meaning                                                                                                                                           |
    | ------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | `BROWSERBOX_RELAY_URL`                | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it. |
-   | `BROWSERBOX_ENROLLMENT_SECRET`        | —                | **Required**, at least 16 characters.                                                                                                             |
-   | `BROWSERBOX_NODE_ID`                  | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                 |
-   | `BROWSERBOX_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                          |
-   | `BROWSERBOX_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more (empty means the default).                                                 |
-   | `BROWSERBOX_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                    |
-   | `BROWSERBOX_HEADLESS`                 | `true`           | `false` for a headful browser (needs a display).                                                                                                  |
-   | `BROWSERBOX_PROFILE_DIR`              | a fresh temp dir | Chromium's profile.                                                                                                                               |
-   | `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see (see Trust). Never passes `BROWSERBOX_*`.                              |
-   | `BROWSERBOX_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                       |
+   | `BROWSERBAY_RELAY_URL`                | —                | **Required.** The relay's address. A node refuses `http://` unless the relay is on the same machine, because the enrollment secret travels to it. |
+   | `BROWSERBAY_ENROLLMENT_SECRET`        | —                | **Required**, at least 16 characters.                                                                                                             |
+   | `BROWSERBAY_NODE_ID`                  | the hostname     | A name, unique per replica (a second node with the same name replaces the first): letters, digits, `_`, `.`, `-`.                                 |
+   | `BROWSERBAY_MAX_CONTEXTS`             | `5`              | Concurrent slots on this node, 1 to 100.                                                                                                          |
+   | `BROWSERBAY_DRAIN_SECONDS`            | `120`            | How long a stopping node waits for its slots (on `SIGTERM`), 0 or more (empty means the default).                                                 |
+   | `BROWSERBAY_CHROMIUM_SANDBOX`         | `false`          | `true` keeps Chromium's own sandbox on (needs user namespaces). See Isolation.                                                                    |
+   | `BROWSERBAY_HEADLESS`                 | `true`           | `false` for a headful browser (needs a display).                                                                                                  |
+   | `BROWSERBAY_PROFILE_DIR`              | a fresh temp dir | Chromium's profile.                                                                                                                               |
+   | `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH` | none             | Comma-separated names of environment variables the browser should also see (see Trust). Never passes `BROWSERBAY_*`.                              |
+   | `BROWSERBAY_CHROMIUM_EXECUTABLE`      | the image's      | A Chromium other than the one in the image.                                                                                                       |
 
-   A box can also take remote nodes: set `BROWSERBOX_ENROLLMENT_SECRETS` on it and point the nodes at it. A node that cannot join says why in its log (an unreachable address, a wrong secret, an invalid id or slot count, a duplicate id) and keeps trying.
+   A box can also take remote nodes: set `BROWSERBAY_ENROLLMENT_SECRETS` on it and point the nodes at it. A node that cannot join says why in its log (an unreachable address, a wrong secret, an invalid id or slot count, a duplicate id) and keeps trying.
 
 4. **Check it:**
 
    ```sh
    curl https://browsers.example.com/health
-   curl -H "Authorization: Bearer $BROWSERBOX_API_KEY" https://browsers.example.com/v1/nodes
+   curl -H "Authorization: Bearer $BROWSERBAY_API_KEY" https://browsers.example.com/v1/nodes
    ```
 
 ### Secrets: three secrets, three jobs
@@ -169,15 +190,15 @@ When you want browsers on several machines, run **one relay** and any number of 
 
 What the box does enforce, tested against real Chromium (`test/scope.browser.test.ts`):
 
-- **Slots cannot reach each other.** Each slot is its own BrowserContext behind a virtual DevTools endpoint ([`src/node/scope.mjs`](src/node/scope.mjs)) that cannot see or reach another slot's pages, targets, contexts or sessions, including by guessing ids.
+- **Slots cannot reach each other.** Each slot is its own BrowserContext behind a virtual DevTools endpoint ([`src/node/scope.ts`](src/node/scope.ts)) that cannot see or reach another slot's pages, targets, contexts or sessions, including by guessing ids.
 - **A client is held to the web.** It cannot point a page at `file:`, `chrome:`, `devtools:`, `view-source:` or `about:` pages other than blank (only `http(s)`, `data:` and `blob:`), cannot have the browser read a file path into a page (`DOM.setFileInputFiles`, dragging files in), and cannot choose where a download goes (downloads are denied from the start).
-- **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's: `PATH`, `HOME`, the locale (`LANG`, `LC_*`), `TZ`, the display (`DISPLAY`, `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_*`), library and font paths, and proxy and CA settings (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_*`). A headful node that needs more (`LIBGL_*`, `MESA_*`, `GTK_*`, `DBUS_SESSION_BUS_ADDRESS`) names it in `BROWSERBOX_CHROMIUM_ENV_PASSTHROUGH`; the box's own `BROWSERBOX_*` settings can never be passed.
+- **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's: `PATH`, `HOME`, the locale (`LANG`, `LC_*`), `TZ`, the display (`DISPLAY`, `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_*`), library and font paths, and proxy and CA settings (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_*`). A headful node that needs more (`LIBGL_*`, `MESA_*`, `GTK_*`, `DBUS_SESSION_BUS_ADDRESS`) names it in `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH`; the box's own `BROWSERBAY_*` settings can never be passed.
 
 What it does **not** do: it limits what a client can _ask_ of the machine, it does not make a client harmless.
 
 - **A slot can browse anything the node's network can reach**: localhost services, the LAN, a cloud metadata address (`169.254.169.254`). That is SSRF, inherent in giving someone a browser.
 - **The node process's own environment holds a secret** (a node's enrollment secret; in the all-in-one, the API key) and is readable by the browser's OS user through the process table. The restrictions above keep a client from asking for it; they are a filter on a very capable protocol, not a sandbox. Nothing here is proof against a flaw in that filter or in Chromium.
-- **Slots on one node share a browser process**, so a hostile page that crashes or exhausts it takes every slot on that node with it, and a renderer exploit is not contained by a VM. Chromium's own sandbox is the control for that: it is off by default (`--no-sandbox`) because containers rarely allow the user namespaces it needs; set `BROWSERBOX_CHROMIUM_SANDBOX=true` where yours does.
+- **Slots on one node share a browser process**, so a hostile page that crashes or exhausts it takes every slot on that node with it, and a renderer exploit is not contained by a VM. Chromium's own sandbox is the control for that: it is off by default (`--no-sandbox`) because containers rarely allow the user namespaces it needs; set `BROWSERBAY_CHROMIUM_SANDBOX=true` where yours does.
 
 So:
 
@@ -192,10 +213,10 @@ So:
 - **A node's browser crashes.** The node exits and the platform restarts it. Its slots are reported unreachable (`slot.isAlive()` is `false`); the next `acquire` gets a fresh browser. Nothing is retried on its own.
 - **The relay restarts.** Nodes reconnect on their own and list the contexts they still hold, with a hash of each slot's token, so the relay adopts them and existing tokens keep working. A node whose control socket drops keeps its slots for about fifteen seconds before the relay gives up on it.
 - **A client dies mid-use.** Every browser closes itself at its `maxLifetimeSeconds`, even while the relay is unreachable. For something sooner, run `box.reap(...)` on a schedule.
-- **Stopping a node.** On `SIGTERM` it stops taking slots, waits up to `BROWSERBOX_DRAIN_SECONDS` for the current ones, then exits. The platform has to wait that long too (`docker stop --time`, Compose `stop_grace_period`, a Kubernetes `terminationGracePeriodSeconds`), or it kills the node first.
+- **Stopping a node.** On `SIGTERM` it stops taking slots, waits up to `BROWSERBAY_DRAIN_SECONDS` for the current ones, then exits. The platform has to wait that long too (`docker stop --time`, Compose `stop_grace_period`, a Kubernetes `terminationGracePeriodSeconds`), or it kills the node first.
 - **A create that does not finish.** If a node does not confirm a new slot in time, or its connection drops while it is being made, the relay tells the node to close it and will not adopt it later, so a slow node does not leave a browser holding a place that nobody can use.
 - **Mismatched versions.** The node and the relay each announce their protocol version. The relay closes a node that speaks another one (code 4426) and the node logs a warning. Upgrade the relay and the nodes together.
-- **Rotating an enrollment secret.** Add the new `name:sha256` to `BROWSERBOX_ENROLLMENT_SECRETS`, move the nodes to the new secret (restart them), then remove the old entry.
+- **Rotating an enrollment secret.** Add the new `name:sha256` to `BROWSERBAY_ENROLLMENT_SECRETS`, move the nodes to the new secret (restart them), then remove the old entry.
 - **Bandwidth.** Watching a slot (a DevTools screencast) costs about the frame size times the frame rate through the node and the relay. Measured on loopback against a page that repaints every frame (the worst case), one watcher was about 60 frames per second at about 36 KB each, roughly 2 MB/s; a static page sends frames only when it repaints and costs far less. Budget the relay's network for that figure per concurrent watcher, and measure on your real network (`pnpm test:browser` prints it).
 
 ## Limits of this version
@@ -214,12 +235,12 @@ pnpm install
 pnpm test           # unit tests: relay, registry, node agent, scope hub (against a fake Chromium), client, CLI
 pnpm test:browser   # the same paths against real Chromium, then the whole box as processes (needs Chromium: see below)
 pnpm run ci         # typecheck + format check + unit tests (what CI runs first). `pnpm ci` is pnpm's own clean-install, not this
-docker build -t browserbox .                         # the box image (Chromium included)
-docker build --target relay -t browserbox-relay .    # the relay alone
+docker build -t browserbay .                         # the box image (Chromium included)
+docker build --target relay -t browserbay-relay .    # the relay alone
 ```
 
 `pnpm test:browser` uses Playwright's Chromium. Install it once with `pnpm exec playwright install chromium` (the first launch afterwards can take 20+ seconds on macOS while the system checks the download, longer than the node's 30 s startup allows, so run it once by hand first). (Playwright's install removes browsers that belong to other Playwright versions in the shared cache; set `PLAYWRIGHT_SKIP_BROWSER_GC=1` if other projects on this machine use that cache.)
 
-Layout: `src/protocol.js` (the wire contract, shared), `src/relay/` (TypeScript, compiled to `dist/` by `pnpm build`), `src/node/` (plain JavaScript, runs as it is: Chromium launch, the scope hub, the relay agent), `src/client/` (plain JavaScript with hand-written types, so it installs from git with no build step), `src/box/` (the all-in-one).
+Layout: everything is TypeScript under `src/`, compiled to `dist/` by `pnpm build` (which an install from git also runs, as the package's `prepare` step). `src/protocol.ts` (the wire contract, shared), `src/relay/` (the relay), `src/node/` (Chromium launch, the scope hub, the relay agent), `src/client/` (the client), `src/box/` (the all-in-one), `src/cli.ts` (the `browserbay` command). Tests sit next to what they test (`*.test.ts`) and run straight from source; the CLI tests run the built `dist/cli.js`.
 
-When you change `src/node/scope.mjs`, re-run `pnpm test:browser`. `src/node/fake-chromium.mjs` stands in for Chromium in the unit tests and must stay in step with it. A hub test that passes is not proof: mutate the hub (resume popups early, skip release cleanup, unfiltered `Target.getTargets`) and check that a test notices.
+When you change `src/node/scope.ts`, re-run `pnpm test:browser`. `src/node/fake-chromium.ts` stands in for Chromium in the unit tests and must stay in step with it. A hub test that passes is not proof: mutate the hub (resume popups early, skip release cleanup, unfiltered `Target.getTargets`) and check that a test notices.
