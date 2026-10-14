@@ -4,6 +4,13 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-14
+
+### Fixed
+
+- **Two wrong install lines in the client READMEs.** The Python client's README led with `pip install browserbay`, but the client is not on PyPI yet: it now leads with the install from the repository. The Go client's README gave a `go get ...@v0.1.0` example that cannot resolve, because no `clients/go` tag exists yet: it now explains the tags and how to pin a commit.
+- **The CLI reference now says `start` and `node` need a Chromium** outside the Docker images: set `BROWSERBAY_CHROMIUM_EXECUTABLE`, or the process exits with "Chromium was not found". `secret` and `key` need no browser.
+
 ## [0.2.1] - 2026-10-14
 
 ### Changed
@@ -49,7 +56,8 @@ First release.
 - **Docker images**, `ghcr.io/degoke/browserbay` (Chromium included) and `ghcr.io/degoke/browserbay-relay`, and a Compose file.
 - A protocol version check between the relay and its nodes.
 
-[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/degoke/browserbay/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/degoke/browserbay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/degoke/browserbay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/degoke/browserbay/releases/tag/v0.1.0
