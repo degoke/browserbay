@@ -4,6 +4,16 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-14
+
+### Changed
+
+- **Releases reach npm through staged publishing.** The release workflow stages the package with `npm stage publish`, and a maintainer approves it with two-factor authentication before it can be installed. The npm token no longer has to bypass 2FA. See `RELEASING.md`.
+
+### Fixed
+
+- **The 0.2.0 release stopped part way:** npm asked for a one-time code, so 0.2.0 is on GitHub Packages only, and neither npm nor the Docker images have it. 0.2.1 is the first version on npmjs.com and the first with Docker images from the release workflow.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
@@ -39,6 +49,7 @@ First release.
 - **Docker images**, `ghcr.io/degoke/browserbay` (Chromium included) and `ghcr.io/degoke/browserbay-relay`, and a Compose file.
 - A protocol version check between the relay and its nodes.
 
-[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/degoke/browserbay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/degoke/browserbay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/degoke/browserbay/releases/tag/v0.1.0
