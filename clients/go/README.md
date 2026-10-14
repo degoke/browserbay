@@ -10,7 +10,7 @@ Standard library only, Go 1.22 or newer.
 go get github.com/degoke/browserbay/clients/go
 ```
 
-The module lives in a subdirectory of the repository (`clients/go`), so its versions are tagged `clients/go/vX.Y.Z`, not `vX.Y.Z`. `go get github.com/degoke/browserbay/clients/go@v0.1.0` resolves the tag `clients/go/v0.1.0`.
+The module lives in a subdirectory of the repository (`clients/go`), so its versions are tagged `clients/go/vX.Y.Z`, not `vX.Y.Z`. The repository's own `v0.2.1` is the Node package's tag, and `go get github.com/degoke/browserbay/clients/go@v0.2.1` fails with "does not contain package". Until a `clients/go` tag is pushed, `go get` takes the latest commit on `main` as a pseudo-version (`v0.0.0-<date>-<commit>`). Pin one with `go get github.com/degoke/browserbay/clients/go@<commit>`. Once there is a tag, `@vX.Y.Z` resolves `clients/go/vX.Y.Z`.
 
 ## Quick start
 

@@ -6,11 +6,7 @@ It uses the standard library only, so installing it adds no dependencies. Python
 
 ## Install
 
-```sh
-pip install browserbay
-```
-
-The package is not necessarily published to PyPI yet. To install it from the repository:
+This client is not on PyPI yet, so `pip install browserbay` finds nothing. Install it from the repository:
 
 ```sh
 pip install "git+https://github.com/degoke/browserbay.git#subdirectory=clients/python"
