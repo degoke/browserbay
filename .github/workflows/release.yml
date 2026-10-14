@@ -70,7 +70,9 @@ jobs:
           esac
 
   # The same package on npmjs.com, where `pnpm add @degoke/browserbay` needs no registry setup and no token. It needs the
-  # NPM_TOKEN secret (RELEASING.md says how to make it). Provenance ties the published package to this workflow run.
+  # NPM_TOKEN secret (RELEASING.md says how to make it). The job only STAGES the package: it cannot be installed until a
+  # maintainer approves it with 2FA (RELEASING.md says how), so the token does not have to bypass 2FA, and a stolen
+  # token cannot put a version live. Provenance ties the package to this workflow run.
   npm:
     needs: ci
     runs-on: ubuntu-latest
@@ -89,9 +91,13 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm build
-      # A pre-release (v1.0.0-rc.1) is published under `next`, so it never becomes what `latest` installs. Re-running the
-      # workflow (to retry the images, say) skips a version the registry already has.
-      - name: Publish the package
+      # `npm stage publish` needs npm 11.15 or newer, which is newer than the npm that Node 24 ships.
+      - run: npm install --global 'npm@^11.15.0'
+      - run: npm --version
+      # A pre-release (v1.0.0-rc.1) is staged under `next`, so it never becomes what `latest` installs. Re-running the
+      # workflow skips a version the registry already has, but a version that is staged and not yet approved is not on
+      # the registry: approve or reject it before re-running, or the re-run stages it a second time.
+      - name: Stage the package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DIST_TAG: ${{ contains(github.ref_name, '-') && 'next' || 'latest' }}
@@ -106,7 +112,7 @@ jobs:
           bash scripts/npm-published.sh "$spec" || status=$?
           case "$status" in
             0) echo "$spec is already published" ;;
-            1) npm publish --ignore-scripts --provenance --access public --tag "$DIST_TAG" ;;
+            1) npm stage publish --ignore-scripts --provenance --access public --tag "$DIST_TAG" ;;
             *)
               echo "::error::Could not tell whether $spec is already published (see the registry error above). Re-run the job."
               exit 1
@@ -114,7 +120,8 @@ jobs:
           esac
 
   publish:
-    # The images are released only once both packages are, so a tag is never half-released.
+    # The images are released only once the package is on GitHub Packages and staged on npm, so a tag is never half-released.
+    # The npm version goes live when a maintainer approves it, which is after the images: the workflow cannot wait for that.
     needs: [ci, package, npm]
     runs-on: ubuntu-latest
     strategy:

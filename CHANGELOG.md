@@ -4,6 +4,14 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Changed
+
+- **Releases reach npm through staged publishing.** The release workflow stages the package with `npm stage publish`, and a maintainer approves it with two-factor authentication before it can be installed. The npm token no longer has to bypass 2FA. See `RELEASING.md`.
+
+### Fixed
+
+- **The 0.2.0 release stopped part way:** npm asked for a one-time code, so 0.2.0 is on GitHub Packages only, and neither npm nor the Docker images have it. 0.2.1 is the first version on npmjs.com and the first with Docker images from the release workflow.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
