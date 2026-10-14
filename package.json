@@ -1,6 +1,6 @@
 {
   "name": "@degoke/browserbay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted browsers for AI agents and automation: a relay, browser nodes that dial out to it, and a client. Deploy it anywhere, point any project at it.",
   "repository": {
     "type": "git",

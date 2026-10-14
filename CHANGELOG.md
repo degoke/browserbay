@@ -4,6 +4,8 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-14
+
 ### Added
 
 - **Several API keys with namespaces and quotas** (`BROWSERBAY_API_KEYS`, `browserbay key <name> --namespace <ns> --quota <n>`) and **a Chromium per slot** (`BROWSERBAY_ISOLATION=process`).
@@ -37,5 +39,6 @@ First release.
 - **Docker images**, `ghcr.io/degoke/browserbay` (Chromium included) and `ghcr.io/degoke/browserbay-relay`, and a Compose file.
 - A protocol version check between the relay and its nodes.
 
-[Unreleased]: https://github.com/degoke/browserbay/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/degoke/browserbay/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/degoke/browserbay/releases/tag/v0.1.0
