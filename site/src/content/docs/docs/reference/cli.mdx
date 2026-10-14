@@ -5,6 +5,8 @@ description: The browserbay command and its five subcommands.
 
 The `browserbay` command is what the Docker images run. From a checkout, run it as `node dist/cli.js <command>` after `pnpm build`.
 
+`start` and `node` launch Chromium, and the images include one. Anywhere else, set `BROWSERBAY_CHROMIUM_EXECUTABLE` to a Chromium, such as the one Playwright installs (`pnpm exec playwright install chromium`). Without one they exit with `Chromium was not found`. `secret` and `key` need no browser.
+
 | Command                                              | Does                                                                                                                                                                                                                              |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `browserbay start`                                   | The relay and a browser node in one process. The simplest box, and the default in the `browserbay` image.                                                                                                                         |
