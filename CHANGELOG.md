@@ -4,6 +4,10 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Changed
+
+- **The docs now cover a `BROWSERBAY_API_KEYS` entry for a key you already have**: how to hash it (with `printf %s`, not `echo`, whose newline changes the hash), what each field of the entry is, and that the relay cannot check the strength of a key it only holds a hash of. The README and the configuration page both have it, and the CLI reference points to it.
+
 ## [0.2.2] - 2026-10-14
 
 ### Fixed
