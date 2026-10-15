@@ -178,6 +178,28 @@ It prints the key for the service (its client's `apiKey`) and the entry for the 
 - Names, hashes and namespaces must each be unique across the entries.
 - Slot tokens are unchanged: whoever holds a slot's token can drive that slot, whatever key made it.
 
+#### A key you already have
+
+`browserbay key` makes a key and its entry together. If the key already exists (a secret your service reads from its own settings, say), make the entry yourself. The relay wants the SHA-256 of the key as 64 hex characters, never the key:
+
+```sh
+printf %s "$KEY" | openssl dgst -sha256 | awk '{print $NF}'
+```
+
+Use `printf %s`, not `echo`. `echo` adds a newline, which changes the hash, and then the key is never accepted: every request is `401`. Put the hash in an entry on the box, and give the service the same key and the same namespace:
+
+```sh
+# on the box: name:hash:namespace:quota
+BROWSERBAY_API_KEYS=billing:<hash>:billing:5
+```
+
+```ts
+// on the service
+createBrowserBay({ url, apiKey: process.env.BROWSERBAY_API_KEY, namespace: 'billing' })
+```
+
+The first field is a name for the key (the relay uses it in its logs; letters, digits, `_`, `.` and `-`). The third, the namespace, must be the word the client is made with. The fourth, the quota, is optional, so `billing:<hash>:billing` is a valid entry too. The relay only holds the hash, so it cannot check how strong the key is: make it at least 16 random characters (`openssl rand -base64 24` makes one).
+
 ### Kubernetes
 
 A Helm chart in [`deploy/helm/browserbay`](deploy/helm/browserbay/README.md) runs one relay and the nodes as a separate Deployment, so the nodes scale on their own (by hand or with a HorizontalPodAutoscaler) without touching the relay. A node being removed finishes its browsers first. Nodes dial the relay's `https://` address, so serve the relay over HTTPS first (the chart has an ingress for it). It also has an `allInOne` mode: one pod that is a whole box.

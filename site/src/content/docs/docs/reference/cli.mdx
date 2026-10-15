@@ -45,6 +45,8 @@ The service must create its browsers with namespace "billing".
 
 A name and a namespace may contain letters, digits, `_`, `.` and `-`. `--quota` needs `--namespace`.
 
+`key` always makes a new key. To use one you already have, hash it yourself: see [A key you already have](/docs/deploy/configuration/#a-key-you-already-have).
+
 ## Exit codes
 
 A bad setting prints a sentence, not a stack trace, and exits with status `2`. An unknown command also exits `2`. Other failures exit `1`. When Chromium dies, a node exits with status `1` so the platform restarts it.
