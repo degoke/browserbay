@@ -141,6 +141,44 @@ const slot = await box.acquire({
 
 The slot's `navigator.language`, `navigator.languages`, `Accept-Language` header and `Intl` time zone then say `de-DE` and `Europe/Berlin`. Match them to the proxy's country. A box whose nodes share one Chromium cannot do this per slot, and `acquire` throws `UnsupportedError` at once rather than make a slot in the wrong zone.
 
+## Keep a session between runs
+
+A site that has checked your browser once usually does not check it again for a while: it hands the browser a clearance cookie (`cf_clearance`, `datadome`, `_abck` and the like), and a signed-in session is a cookie too. Running the check again on every run is what makes a flow slow and flaky. So keep the session. The box adds nothing for this, because cookies are the slot's own and your driver already reaches them.
+
+**Keep the slot.** A slot lives up to `maxLifetimeSeconds` (at most 24 hours), and [a saved slot](/docs/guides/hand-off/) comes back with its pages, cookies and storage as they were:
+
+```js
+const saved = JSON.stringify(slot) // keep it like a secret: it holds the slot token
+// ... later, in another process
+const slot = box.slot(JSON.parse(saved))
+const browser = await chromium.connectOverCDP(slot.cdpUrl, { headers: slot.headers })
+```
+
+**Or move the cookies to a new slot.** Take them out with your driver, and put them in before the first request:
+
+```js
+// at the end of a run
+const cookies = await context.cookies() // HttpOnly ones too
+const storage = await page.evaluate(() => ({ ...localStorage }))
+await db.save(identity, { cookies, storage }) // cookies are credentials: encrypt them
+
+// at the start of the next, in a slot of its own
+const saved = await db.load(identity)
+await context.addCookies(saved.cookies)
+await context.addInitScript(
+  ([origin, values]) => {
+    if (location.origin === origin) for (const [k, v] of Object.entries(values)) localStorage.setItem(k, v)
+  },
+  [origin, saved.storage]
+)
+```
+
+A clearance cookie is bound to what it was issued to, so it only works again when the slot looks the same to the site:
+
+- **The same exit address.** Use a sticky proxy session (often chosen by the user name), or the same node. A cookie from one address presented from another is refused.
+- **The same browser.** The user agent and the Chromium version should match: keep the same image tag between runs.
+- **Keep identities apart.** One cookie jar per identity, never shared between unrelated users or sites you run for different parties.
+
 ## What is left, and what to do about it
 
 <Aside type="note" title="The address matters most">
