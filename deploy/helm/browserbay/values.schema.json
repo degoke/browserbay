@@ -71,6 +71,19 @@
         "extraEnv": { "type": "array" }
       }
     },
+    "webBotAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["off", "optional", "always", false] },
+        "agentUrl": { "type": "string" },
+        "format": { "enum": ["legacy", "dictionary"] },
+        "ttlSeconds": { "type": "integer", "minimum": 10, "maximum": 86400 },
+        "key": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string", "minLength": 1 }
+      }
+    },
     "node": {
       "type": "object",
       "additionalProperties": false,
@@ -82,7 +95,13 @@
         "drainSeconds": { "$ref": "#/definitions/count" },
         "minReadySeconds": { "$ref": "#/definitions/count" },
         "sandbox": { "type": "boolean" },
-        "headless": { "type": "boolean" },
+        "headless": { "enum": [true, false, "true", "false", "xvfb"] },
+        "labels": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,63}$" }
+        },
+        "exclusive": { "type": "boolean" },
         "resources": { "type": "object" },
         "tmpVolume": {
           "type": "object",

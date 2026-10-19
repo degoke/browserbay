@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ConfigError, startBrowserNode } from './browser-node.js'
+import { generateSigningKey } from '../web-bot-auth.js'
 import { parseNodeEnv, parseNodeSettings } from './main.js'
 
 const SECRET = 'a-node-enrollment-secret'
@@ -12,7 +13,8 @@ test('node settings: the defaults, and each of the node’s own settings read fr
   const defaults = parseNodeSettings({})
   assert.equal(defaults.maxContexts, 5)
   assert.equal(defaults.drainSeconds, 120)
-  assert.equal(defaults.headless, true)
+  assert.equal(defaults.display, 'headless', 'no display unless asked for')
+  assert.equal(defaults.hideWebdriver, true)
   assert.equal(defaults.sandbox, false)
   assert.equal(defaults.profileDir, undefined, 'a fresh temporary profile unless one is named')
   assert.ok(defaults.nodeId, 'the hostname names a node that has no name')
@@ -31,7 +33,10 @@ test('node settings: the defaults, and each of the node’s own settings read fr
     maxContexts: 8,
     drainSeconds: 30,
     profileDir: '/data/profile',
-    headless: false,
+    display: 'host',
+    hideWebdriver: true,
+    labels: [],
+    exclusive: false,
     sandbox: true,
     isolation: 'process'
   })
@@ -40,6 +45,56 @@ test('node settings: the defaults, and each of the node’s own settings read fr
   for (const value of ['Process', 'vm', 'per-slot']) {
     assert.throws(() => parseNodeSettings({ BROWSERBAY_ISOLATION: value }), /BROWSERBAY_ISOLATION must be/, value)
   }
+})
+
+test('node settings: BROWSERBAY_HEADLESS picks the display, BROWSERBAY_WEBDRIVER_FLAG whether webdriver is hidden', () => {
+  for (const [value, display] of [
+    ['true', 'headless'],
+    ['false', 'host'],
+    ['xvfb', 'xvfb'],
+    ['XVFB', 'xvfb'],
+    ['', 'headless'],
+    ['  ', 'headless']
+  ] as const) {
+    assert.equal(parseNodeSettings({ BROWSERBAY_HEADLESS: value }).display, display, JSON.stringify(value))
+  }
+  for (const value of ['yes', '1', 'xvfb-run', 'constructor', 'toString']) {
+    assert.throws(() => parseNodeSettings({ BROWSERBAY_HEADLESS: value }), /BROWSERBAY_HEADLESS must be/, value)
+  }
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'keep' }).hideWebdriver, false)
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'hide' }).hideWebdriver, true)
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: '' }).hideWebdriver, true, 'empty is not set')
+  assert.throws(() => parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'off' }), /BROWSERBAY_WEBDRIVER_FLAG must be/)
+})
+
+test('node settings: labels name a node, and an exclusive node must have one', () => {
+  assert.deepEqual(parseNodeSettings({}).labels, [])
+  assert.equal(parseNodeSettings({}).exclusive, false)
+  assert.deepEqual(parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'residential, eu-west ,residential,' }).labels, [
+    'residential',
+    'eu-west'
+  ])
+  assert.deepEqual(parseNodeSettings({ BROWSERBAY_NODE_LABELS: '   ' }).labels, [], 'blank is not set')
+  const exclusive = parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'home', BROWSERBAY_NODE_EXCLUSIVE: 'true' })
+  assert.equal(exclusive.exclusive, true)
+  for (const notTrue of ['', 'false', 'TRUE', 'yes', '1']) {
+    assert.equal(
+      parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'home', BROWSERBAY_NODE_EXCLUSIVE: notTrue }).exclusive,
+      false,
+      `only the exact word "true" turns it on, not ${JSON.stringify(notTrue)}`
+    )
+  }
+  for (const value of ['a b', 'a/b', 'é', 'x'.repeat(64)]) {
+    assert.throws(() => parseNodeSettings({ BROWSERBAY_NODE_LABELS: value }), /BROWSERBAY_NODE_LABELS/, value)
+  }
+  assert.throws(
+    () => parseNodeSettings({ BROWSERBAY_NODE_LABELS: Array.from({ length: 17 }, (_, i) => `l${i}`).join(',') }),
+    /at most 16 labels/
+  )
+  assert.throws(
+    () => parseNodeSettings({ BROWSERBAY_NODE_EXCLUSIVE: 'true' }),
+    /BROWSERBAY_NODE_EXCLUSIVE needs BROWSERBAY_NODE_LABELS/
+  )
 })
 
 test('node settings: what the relay would refuse is refused here, at startup, with the setting named', () => {
@@ -150,5 +205,96 @@ test('starting a node refuses, before anything is launched, what the operator ha
     }
   } finally {
     await rm(empty, { recursive: true, force: true })
+  }
+})
+
+test('a node on xvfb refuses to start when Xvfb cannot run, in either isolation mode, and leaves nothing behind', async () => {
+  // A temporary directory of its own, so what is left in it can only be this node's (other test files run alongside).
+  const scratch = await mkdtemp(join(tmpdir(), 'browserbay-scratch-'))
+  const saved = process.env.TMPDIR
+  process.env.TMPDIR = scratch
+  try {
+    for (const isolation of ['context', 'process'] as const) {
+      await assert.rejects(
+        startBrowserNode({
+          relayUrl: 'https://relay.example.com',
+          enrollmentSecret: SECRET,
+          nodeId: 'n',
+          isolation,
+          display: 'xvfb',
+          executable: process.execPath,
+          xvfb: { executable: join(scratch, 'no-such-xvfb') }
+        }),
+        (error) => error instanceof ConfigError && /Xvfb was not found/.test(error.message),
+        isolation
+      )
+    }
+    assert.deepEqual(await readdir(scratch), [], 'neither a profile nor a display directory is left behind')
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = saved
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test('node settings: Web Bot Auth is off unless asked for, and asking for it needs a key and where the box says it is', () => {
+  assert.equal(parseNodeSettings({}).webBotAuth, undefined)
+  assert.ok(!('webBotAuth' in parseNodeSettings({ BROWSERBAY_WEB_BOT_AUTH: 'off' })))
+  assert.ok(!('webBotAuth' in parseNodeSettings({ BROWSERBAY_WEB_BOT_AUTH: '' })), 'empty is not set')
+
+  const made = generateSigningKey()
+  const base = {
+    BROWSERBAY_WEB_BOT_AUTH_KEY: made.privateJwk,
+    BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com'
+  }
+  for (const mode of ['optional', 'always', 'ALWAYS']) {
+    const settings = parseNodeSettings({ ...base, BROWSERBAY_WEB_BOT_AUTH: mode })
+    assert.deepEqual(settings.webBotAuth, {
+      mode: mode.toLowerCase(),
+      key: made.privateJwk,
+      agent: 'https://box.example.com',
+      format: 'legacy',
+      ttlSeconds: 60
+    })
+  }
+  const custom = parseNodeSettings({
+    ...base,
+    BROWSERBAY_WEB_BOT_AUTH: 'optional',
+    BROWSERBAY_WEB_BOT_AUTH_FORMAT: 'Dictionary',
+    BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '300'
+  })
+  assert.equal(custom.webBotAuth?.format, 'dictionary')
+  assert.equal(custom.webBotAuth?.ttlSeconds, 300)
+  assert.equal(
+    parseNodeSettings({ ...base, BROWSERBAY_WEB_BOT_AUTH: 'optional', BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '  ' })
+      .webBotAuth?.ttlSeconds,
+    60
+  )
+})
+
+test('node settings: a Web Bot Auth setting that cannot work stops the node at start-up, naming it, and never showing the key', () => {
+  const made = generateSigningKey()
+  const ok = {
+    BROWSERBAY_WEB_BOT_AUTH: 'always',
+    BROWSERBAY_WEB_BOT_AUTH_KEY: made.privateJwk,
+    BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com'
+  }
+  const secret = JSON.parse(made.privateJwk).d as string
+  for (const [env, expected] of [
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH: 'sometimes' }, /BROWSERBAY_WEB_BOT_AUTH must be "off", "optional" or "always"/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_KEY: '' }, /needs BROWSERBAY_WEB_BOT_AUTH_KEY/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_KEY: 'not a key' }, /JSON Web Key/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: '' }, /needs BROWSERBAY_WEB_BOT_AUTH_AGENT/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: 'http://box.example.com' }, /https address/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com/path' }, /no path/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_FORMAT: 'xml' }, /"legacy" or "dictionary"/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '5' }, /10 to 86400/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: 'soon' }, /10 to 86400/]
+  ] as const) {
+    assert.throws(
+      () => parseNodeSettings(env),
+      (error: Error) => expected.test(error.message) && !error.message.includes(secret),
+      JSON.stringify(env).slice(0, 80)
+    )
   }
 })

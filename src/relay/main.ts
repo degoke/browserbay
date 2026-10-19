@@ -12,10 +12,15 @@ export async function runRelay(env: NodeJS.ProcessEnv = process.env) {
     apiKeys: config.apiKeys,
     enrollmentSecrets: config.enrollmentSecrets,
     maxAcquireWaitMs: config.maxAcquireWaitMs,
+    webBotAuthKey: config.webBotAuthKey,
     logger: { info: log('info'), warn: log('warn') }
   })
   const port = await relay.listen(config.port)
-  log('info')('browserbay relay listening', { port, enrollments: config.enrollmentSecrets.map((entry) => entry.id) })
+  log('info')('browserbay relay listening', {
+    port,
+    enrollments: config.enrollmentSecrets.map((entry) => entry.id),
+    ...(relay.webBotAuthKeyId ? { webBotAuthKeyId: relay.webBotAuthKeyId } : {})
+  })
 
   const shutdown = async () => {
     await relay.close()

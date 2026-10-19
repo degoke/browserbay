@@ -1,5 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { CLOSE, type NodeContextReport, type NodeSummary, type RelayToNode, type SlotSummary } from '../protocol.js'
+import {
+  CLOSE,
+  type NodeContextReport,
+  type NodeSummary,
+  type RelayToNode,
+  type SlotOptions,
+  type SlotSummary
+} from '../protocol.js'
 
 /** How the registry talks to a connected node. The relay server backs it with the node's control socket. */
 export interface NodeLink {
@@ -11,6 +18,18 @@ export class NoCapacityError extends Error {
   constructor() {
     super('No browser capacity is available')
     this.name = 'NoCapacityError'
+  }
+}
+
+/**
+ * Nodes are connected, and none of them could ever serve this request: none has a feature it needs, or carries a label it
+ * asks for, or they all only take labelled slots. Waiting would not change that, so it is said at once (422) and not after
+ * the whole wait as `no capacity`.
+ */
+export class UnsupportedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UnsupportedError'
   }
 }
 
@@ -32,7 +51,21 @@ export interface NodeState {
   slots: Set<string>
   /** Creates sent to the node and not yet answered; they count against its capacity. */
   reserved: number
+  /** What the node can do for a slot beyond giving it a browser (NODE_FEATURE). */
+  features: Set<string>
+  /** What its operator calls it: a slot can ask for them. */
+  labels: Set<string>
+  /** Only slots that ask for one of its labels are placed on it. */
+  exclusive: boolean
 }
+
+/** What a slot asks of the node it is placed on. A slot with none can go anywhere that is not exclusive. */
+export interface SlotNeeds {
+  features: string[]
+  labels: string[]
+}
+
+const NO_NEEDS: SlotNeeds = { features: [], labels: [] }
 
 export interface SlotState {
   slotId: string
@@ -65,6 +98,21 @@ export interface RegistryOptions {
   tombstoneMs?: number
   /** Called when a node refuses, fails or never answers a create, so these are never silently swallowed. */
   onCreateFailed?: (nodeId: string, error: unknown) => void
+  /**
+   * After the relay starts, and after each new node joins, a request that no connected node could serve waits like any other:
+   * the nodes that could have may still be reconnecting. Once this has passed with no new node it is `unsupported` at once.
+   * Default 15 s.
+   */
+  unsupportedGraceMs?: number
+}
+
+/** What a node said when it refused a slot, as the relay passes it on: attributed, printable ASCII, bounded. */
+function refusalMessage(said: string) {
+  const reason = said
+    .replace(/[^\x20-\x7e]+/g, ' ')
+    .trim()
+    .slice(0, 200)
+  return `A node cannot make this slot as asked${reason ? `: "${reason}"` : ''}`
 }
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex')
@@ -89,6 +137,9 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
   const nodeTimeoutMs = options.nodeTimeoutMs ?? 15_000
   const reconcileGraceMs = options.reconcileGraceMs ?? 15_000
   const tombstoneMs = options.tombstoneMs ?? 2 * 60 * 60_000
+  const unsupportedGraceMs = options.unsupportedGraceMs ?? 15_000
+  /** When the registry began, or a node new to it last joined: nodes coming back after a restart arrive one after another. */
+  let lastJoinAt = now()
 
   const nodes = new Map<string, NodeState>()
   const slots = new Map<string, SlotState>()
@@ -165,11 +216,48 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
     }
   }
 
-  function pick(exclude: Set<string>) {
+  /** Whether a node could ever serve a slot with these needs, whatever its load. */
+  function serves(node: NodeState, need: SlotNeeds) {
+    if (need.features.some((feature) => !node.features.has(feature))) return false
+    if (need.labels.some((label) => !node.labels.has(label))) return false
+    // An exclusive node is kept for the slots that ask for it by label.
+    return !node.exclusive || need.labels.length > 0
+  }
+
+  /** What a feature is called to the person who asked for it. */
+  const featureName = (feature: string) =>
+    feature === 'sign'
+      ? 'request signing (BROWSERBAY_WEB_BOT_AUTH)'
+      : feature === 'unsigned'
+        ? 'unsigned requests (a node set to always sign has none)'
+        : feature.startsWith('wba-key:')
+          ? 'signing with the key this relay publishes'
+          : feature
+
+  /** Why no connected node serves a request, in a sentence. */
+  function explainUnsupported(need: SlotNeeds) {
+    const all = [...nodes.values()]
+    const reasons: string[] = []
+    const noFeature = need.features.filter((feature) => !all.some((node) => node.features.has(feature)))
+    if (noFeature.length > 0) reasons.push(`no node offers ${noFeature.map(featureName).join(', ')}`)
+    const noLabel = need.labels.filter((label) => !all.some((node) => node.labels.has(label)))
+    if (noLabel.length > 0) reasons.push(`no node carries the label ${noLabel.join(', ')}`)
+    if (reasons.length === 0) {
+      reasons.push(
+        need.labels.length > 0 || need.features.length > 0
+          ? 'no single node has all of this: the features and the labels together'
+          : 'every node only takes slots that ask for one of its labels (nodeLabels)'
+      )
+    }
+    const text = reasons.join('; ')
+    return text[0]!.toUpperCase() + text.slice(1)
+  }
+
+  function pick(exclude: Set<string>, need: SlotNeeds) {
     let best: NodeState | undefined
     let bestLoad = Infinity
     for (const node of nodes.values()) {
-      if (node.draining || !node.link || exclude.has(node.id)) continue
+      if (node.draining || !node.link || exclude.has(node.id) || !serves(node, need)) continue
       const used = node.slots.size + node.reserved
       if (used >= node.maxContexts) continue
       const load = used / node.maxContexts
@@ -195,7 +283,10 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
     })
   }
 
-  async function createOn(node: NodeState, input: { runId: string; maxLifetimeSeconds: number }) {
+  async function createOn(
+    node: NodeState,
+    input: { runId: string; maxLifetimeSeconds: number; options?: SlotOptions }
+  ) {
     const slotId = `s${randomBytes(12).toString('hex')}`
     const token = randomBytes(24).toString('base64url')
     const tokenHash = hashToken(token)
@@ -222,13 +313,16 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
           reject(new Error('The node did not confirm the new context in time'))
         }, createTimeoutMs)
         pendingCreates.set(reqId, { nodeId: node.id, resolve, reject, timer })
+        // A plain slot's frame is what it always was, so a node that predates options reads it as it always did.
+        const slotOptions = input.options && Object.keys(input.options).length > 0 ? input.options : undefined
         node.link!.send({
           t: 'context.create',
           reqId,
           slotId,
           runId: input.runId,
           tokenHash,
-          maxLifetimeSeconds: input.maxLifetimeSeconds
+          maxLifetimeSeconds: input.maxLifetimeSeconds,
+          ...(slotOptions ? { options: slotOptions } : {})
         })
       })
     } catch (error) {
@@ -252,8 +346,19 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
      * A node connected and authenticated. A node reconnecting under the same id replaces its old connection (which is
      * closed) and keeps the contexts it still reports; a restarted relay adopts everything the node reports.
      */
-    registerNode(input: { id: string; maxContexts: number; link: NodeLink; contexts: NodeContextReport[] }) {
+    registerNode(input: {
+      id: string
+      maxContexts: number
+      link: NodeLink
+      contexts: NodeContextReport[]
+      features?: string[]
+      labels?: string[]
+      exclusive?: boolean
+    }) {
       const previous = nodes.get(input.id)
+      // A node that is new to this relay restarts the grace: the others of a restart come back one after another. One that
+      // reconnects under its own id (a bad connection) does not, or it would postpone the answer for as long as it flapped.
+      if (!previous) lastJoinAt = now()
       const node: NodeState = {
         id: input.id,
         maxContexts: input.maxContexts,
@@ -261,7 +366,10 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
         lastSeen: now(),
         link: input.link,
         slots: new Set(previous?.slots),
-        reserved: 0
+        reserved: 0,
+        features: new Set(input.features),
+        labels: new Set(input.labels),
+        exclusive: Boolean(input.exclusive)
       }
       if (previous) {
         previous.link?.close(CLOSE.replaced, 'This node connected again')
@@ -295,12 +403,15 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
     },
 
     /** The node answered a context.create. */
-    answerCreate(id: string, reqId: string, error?: string) {
+    answerCreate(id: string, reqId: string, error?: string, refused = false) {
       const pending = pendingCreates.get(reqId)
       if (!pending || pending.nodeId !== id) return
       clearTimeout(pending.timer)
       pendingCreates.delete(reqId)
-      if (error) pending.reject(new Error(error))
+      // A node that says it cannot make this slot is not one that is merely busy: the person who asked is told why. What the node
+      // said is quoted in the relay's own sentence, as plain printable text and no longer than a short reason, so a node cannot
+      // make its words read as the relay's.
+      if (error) pending.reject(refused ? new UnsupportedError(refusalMessage(error)) : new Error(error))
       else pending.resolve()
     },
 
@@ -308,13 +419,33 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
      * Reserves a slot on the least-loaded node that has room, waiting up to `waitMs` for one to free up. The token it
      * returns is the only time it exists in the clear.
      */
-    async allocate(input: { runId: string; maxLifetimeSeconds: number; waitMs: number; signal?: AbortSignal }) {
+    async allocate(input: {
+      runId: string
+      maxLifetimeSeconds: number
+      waitMs: number
+      signal?: AbortSignal
+      /** What the slot needs of its node (a feature, a label): only a node that has all of it is used. */
+      need?: SlotNeeds
+      /** What the node is told to do for the slot. Not kept: the registry holds no option, and a proxy's password is one. */
+      options?: SlotOptions
+    }) {
       const { signal } = input
+      const need = input.need ?? NO_NEEDS
       const deadline = now() + input.waitMs
       const failed = new Set<string>()
+      /** Why the nodes that refused this slot did, by node: what asking again would get. */
+      const refusals = new Map<string, string>()
       for (;;) {
         if (signal?.aborted) throw new AllocationAbortedError()
-        const node = pick(failed)
+        // Nodes are here and none could ever do this: waiting is pointless. Nodes are not here yet (a restart): wait.
+        if (
+          nodes.size > 0 &&
+          now() - lastJoinAt >= unsupportedGraceMs &&
+          ![...nodes.values()].some((n) => serves(n, need))
+        ) {
+          throw new UnsupportedError(explainUnsupported(need))
+        }
+        const node = pick(failed, need)
         if (node) {
           try {
             const slot = await createOn(node, input)
@@ -329,8 +460,15 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
             // This node refused or vanished; try another before waiting.
             options.onCreateFailed?.(node.id, error)
             failed.add(node.id)
+            if (error instanceof UnsupportedError) refusals.set(node.id, error.message)
             continue
           }
+        }
+        // Every node that could serve this slot refused it: waiting would only ask them again.
+        // (A node that is draining or disconnected could not be tried: it is not one that was asked and said no.)
+        const refusing = [...nodes.values()].filter((n) => n.link && !n.draining && serves(n, need))
+        if (refusals.size > 0 && refusing.length > 0 && refusing.every((n) => refusals.has(n.id))) {
+          throw new UnsupportedError([...new Set(refusing.map((n) => refusals.get(n.id)!))].join('; '))
         }
         const remaining = deadline - now()
         if (remaining <= 0) throw new NoCapacityError()
@@ -404,7 +542,10 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
         maxContexts: node.maxContexts,
         contexts: node.slots.size,
         draining: node.draining,
-        lastSeenAt: new Date(node.lastSeen).toISOString()
+        lastSeenAt: new Date(node.lastSeen).toISOString(),
+        features: [...node.features],
+        labels: [...node.labels],
+        exclusive: node.exclusive
       }))
     }
   }

@@ -46,6 +46,38 @@ export const NODE_LIMITS = {
 } as const
 
 /**
+ * What a node can do for a slot beyond giving it a browser, told to the relay in its hello. A slot that asks for one is only
+ * placed on a node that has it, because a node that does not know an option would make the slot without it: a slot that was
+ * asked to use a proxy, going out direct.
+ */
+export const NODE_FEATURE = {
+  /** `SlotOptions.proxy`: the slot's traffic goes through a proxy of its own. */
+  proxy: 'proxy',
+  /** `SlotOptions.timezone` and `locale`. Only a node with a Chromium per slot has it: they are set when the browser starts. */
+  locale: 'locale',
+  /** The node can sign a slot's requests (Web Bot Auth): `SlotOptions.signRequests: true`. */
+  sign: 'sign',
+  /** The node can leave a slot's requests unsigned: `SlotOptions.signRequests: false`. A node that always signs does not have it. */
+  unsigned: 'unsigned'
+} as const
+
+/**
+ * What a node that signs says about its key: `wba-key:<key id>`. A relay that publishes a key directory only sends a slot that
+ * asks to be signed to a node signing with that key, because signatures made with another would not verify against it.
+ */
+export const SIGNING_KEY_FEATURE = 'wba-key:'
+
+/** What the relay accepts of a node's labels, and of the labels a slot requires. */
+export const LABEL_LIMITS = {
+  /** Labels one node may carry. */
+  maxPerNode: 16,
+  /** Labels one slot may require. */
+  maxRequired: 8,
+  /** A label is a name (letters, digits, `_`, `.`, `-`), up to this long. */
+  maxLength: 63
+} as const
+
+/**
  * A setting the operator has to fix. The CLI exits with status 2 for it. Recognise it with `instanceof` or by
  * `name === 'ConfigError'`.
  */
@@ -94,13 +126,51 @@ export interface CreateSlotRequest {
   maxLifetimeSeconds: number
   /** How long to wait for a free slot before answering 503 `no_capacity`. The relay caps it at its own maximum. */
   waitMs?: number
+  /** Send the slot's traffic through a proxy. Needs a node with the `proxy` feature (422 `unsupported` if none has it or every node that does refuses the value). */
+  proxy?: ProxySettings
+  /** The IANA time zone the slot's browser runs in, such as `Europe/Berlin`. Needs the `locale` feature. */
+  timezone?: string
+  /** The slot's browser language, such as `de-DE`: its `navigator.language` and `Accept-Language`. Needs the `locale` feature. */
+  locale?: string
+  /** Only place the slot on a node that carries every one of these labels (`BROWSERBAY_NODE_LABELS`). */
+  nodeLabels?: string[]
+  /**
+   * Sign every request of the slot's browser (Web Bot Auth), so sites that know the box can tell whose browser it is. `true` needs
+   * a node that signs, `false` one that can leave it unsigned, and left out is the node's own default (`BROWSERBAY_WEB_BOT_AUTH`).
+   */
+  signRequests?: boolean
 }
 
-/** 201 from POST /v1/slots. The token is shown once; the relay keeps only its hash. 503 `no_capacity` when full. */
+/** A proxy for one slot. The node reaches it through a forwarder of its own, so Chromium never holds the credentials. */
+export interface ProxySettings {
+  /** `http://host:port`, `https://host:port` or `socks5://host:port`. No user name, password or path in it. */
+  server: string
+  username?: string
+  password?: string
+  /** Chromium's proxy bypass list: host patterns that go direct, separated by `,` or `;`. */
+  bypass?: string
+}
+
+/** What a slot asks of its browser beyond a place to run: the part of the request a node acts on. A plain slot has none. */
+export interface SlotOptions {
+  proxy?: ProxySettings
+  timezone?: string
+  locale?: string
+  signRequests?: boolean
+}
+
+/**
+ * 201 from POST /v1/slots. The token is shown once; the relay keeps only its hash. 503 `no_capacity` when full.
+ *
+ * `applied` names the options of the request that the slot has (`proxy`, `timezone`, `locale`, `nodeLabels`). A client
+ * that sent options checks it: a box older than the options answers 201 and ignores what it does not know, and the
+ * slot would be a plain one, going out direct from the node's own address.
+ */
 export interface CreateSlotResponse {
   slotId: string
   token: string
   nodeId: string
+  applied?: string[]
 }
 
 export interface SlotSummary {
@@ -128,6 +198,12 @@ export interface NodeSummary {
   contexts: number
   draining: boolean
   lastSeenAt: string
+  /** What the node can do for a slot (see NODE_FEATURE). */
+  features?: string[]
+  /** What the node's operator calls it (`BROWSERBAY_NODE_LABELS`): a slot can ask for them. */
+  labels?: string[]
+  /** The node only takes slots that ask for one of its labels. */
+  exclusive?: boolean
 }
 
 /** GET /v1/nodes */
@@ -138,6 +214,8 @@ export interface ListNodesResponse {
 /**
  * 403 `forbidden`: the API key is valid but not allowed this (a run id outside its namespace, or `GET /v1/nodes` from a key
  * that has one). 429 `quota_exceeded`: the key's namespace already holds as many slots as its quota allows.
+ * 422 `unsupported`: nodes are connected but none could serve this request (none has a feature or a label it asks for, or
+ * every node that does refused the slot's value, such as a time zone its system lacks), so waiting would not help. 400 `invalid_request` says in `message` what is wrong with options.
  */
 export interface RelayErrorResponse {
   error:
@@ -147,7 +225,9 @@ export interface RelayErrorResponse {
     | 'no_capacity'
     | 'quota_exceeded'
     | 'invalid_request'
+    | 'unsupported'
     | 'node_unavailable'
+  message?: string
 }
 
 // ---- Node control socket (wss://relay/v1/nodes/connect) --------------------------------------------------------
@@ -170,10 +250,26 @@ export type NodeToRelay =
       maxContexts: number
       version: number
       contexts: NodeContextReport[]
+      /**
+       * What this node can do (NODE_FEATURE), its operator's labels and whether it only takes labelled slots. A relay that does
+       * not know these fields ignores them, and a node that does not send them has none: no protocol version needed.
+       */
+      features?: string[]
+      labels?: string[]
+      exclusive?: boolean
     }
   | { t: 'heartbeat'; draining: boolean; contexts: NodeContextReport[] }
   | { t: 'context.created'; reqId: string }
-  | { t: 'context.failed'; reqId: string; message: string }
+  | {
+      t: 'context.failed'
+      reqId: string
+      message: string
+      /**
+       * The slot asked for something this node cannot give (a time zone it lacks, an option it does not know), as opposed to the
+       * node being full or failing: asking this node again will not help, and `message` is for the person who asked.
+       */
+      refused?: boolean
+    }
   /**
    * A context ended on the node's own account (process isolation: the slot's Chromium crashed). The relay drops the slot at
    * once instead of waiting for heartbeats to stop mentioning it. A relay that does not know this frame ignores it, and
@@ -191,6 +287,8 @@ export type RelayToNode =
       runId: string
       tokenHash: string
       maxLifetimeSeconds: number
+      /** Left out for a plain slot. A node answers `context.failed` for an option it does not know, never makes the slot without it. */
+      options?: SlotOptions
     }
   | { t: 'context.release'; slotId: string }
   /** Dial `wss://relay/v1/nodes/stream/<streamId>` and serve slot `slotId` on it. The id is single-use and short-lived. */

@@ -761,7 +761,7 @@ test('dedicated: the client can make contexts of its own, and they are the run�
   const { fake, client } = world
   const first = await client.call('Target.createBrowserContext', {
     disposeOnDetach: true,
-    proxyServer: 'http://proxy:3128',
+    proxyServer: 'http://203.0.113.9:3128',
     originsWithUniversalNetworkAccess: ['https://x'],
     browserContextId: 'ignored',
     other: 1
@@ -771,7 +771,7 @@ test('dedicated: the client can make contexts of its own, and they are the run�
   const sent = fake.commands('Target.createBrowserContext').at(-1)!.params
   assert.deepEqual(
     sent,
-    { proxyServer: 'http://proxy:3128', disposeOnDetach: false },
+    { proxyServer: 'http://203.0.113.9:3128', disposeOnDetach: false },
     'only a proxy passes, and it outlives any connection'
   )
   assert.deepEqual(fake.commands('Browser.setDownloadBehavior').at(-1)?.params, {
@@ -854,4 +854,444 @@ test('dedicated: what keeps the node safe stays fenced, because it never depende
     eventsEnabled: false,
     browserContextId: world.contextId
   })
+})
+
+// ---- a slot's proxy ---------------------------------------------------------------------------------------------------
+
+test('a run made with a proxy has its context made with it, and a plain run with none', async () => {
+  const { fake, scope } = await setup()
+  await scope.createRun('plain')
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, { disposeOnDetach: false })
+  await scope.createRun('empty', {})
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, { disposeOnDetach: false })
+
+  await scope.createRun('proxied', { proxyServer: 'socks5://127.5.6.7:4000', proxyBypassList: '<-loopback>;a.test' })
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.7:4000',
+    proxyBypassList: '<-loopback>;a.test'
+  })
+  await scope.createRun('no-bypass', { proxyServer: 'socks5://127.5.6.8:4001' })
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.8:4001'
+  })
+})
+
+test('dedicated: a context the client makes starts from the slot’s proxy unless it names its own', async () => {
+  const world = await setup({ dedicated: true })
+  await world.scope.createRun('slot', { proxyServer: 'socks5://127.5.6.7:4000', proxyBypassList: '<-loopback>;a.test' })
+  const client = connect(world.scope, world.fake, 'slot')
+  const sent = () => world.fake.commands('Target.createBrowserContext').at(-1)!.params
+
+  await client.call('Target.createBrowserContext')
+  assert.deepEqual(sent(), {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.7:4000',
+    proxyBypassList: '<-loopback>;a.test'
+  })
+
+  await client.call('Target.createBrowserContext', { proxyServer: 'http://203.0.113.9:3128' })
+  assert.deepEqual(
+    sent(),
+    { disposeOnDetach: false, proxyServer: 'http://203.0.113.9:3128' },
+    'its own, with none of the slot’s bypass list'
+  )
+
+  await client.call('Target.createBrowserContext', {
+    proxyServer: 'http://203.0.113.9:3128',
+    proxyBypassList: 'b.test'
+  })
+  assert.deepEqual(sent(), {
+    disposeOnDetach: false,
+    proxyServer: 'http://203.0.113.9:3128',
+    proxyBypassList: 'b.test'
+  })
+
+  // A plain slot's contexts stay plain.
+  await world.scope.createRun('plain-slot')
+  const plain = connect(world.scope, world.fake, 'plain-slot')
+  await plain.call('Target.createBrowserContext')
+  assert.deepEqual(sent(), { disposeOnDetach: false })
+})
+
+test('dedicated: a client cannot point a context of its own at the node itself, however it writes the address', async () => {
+  const world = await setup({ dedicated: true })
+  await world.scope.createRun('slot', { proxyServer: 'socks5://127.5.6.7:4000' })
+  const client = connect(world.scope, world.fake, 'slot')
+  const made = () => world.fake.commands('Target.createBrowserContext').length
+  const before = made()
+
+  for (const proxyServer of [
+    '127.0.0.1:9',
+    'socks5://localhost:1080',
+    'http://[::1]:80',
+    '0x7f000001:80',
+    'socks5://127.5.6.7:4000', // another slot's forwarder is on loopback too
+    '203.0.113.9:1,127.1:2',
+    'http=203.0.113.9:80;https=localhost:443',
+    'http://169.254.169.254:80',
+    'http://127.5.6.7.nip.io:4000', // a name: Chromium resolves it, and it can be made to point at another slot's forwarder
+    'proxy.example.com:8080',
+    5 as never
+  ]) {
+    const answer = await client.call('Target.createBrowserContext', { proxyServer })
+    assert.equal(answer.error?.code, -32602, JSON.stringify(proxyServer))
+    assert.match(answer.error?.message, /proxy cannot be used/)
+  }
+  assert.equal(made(), before, 'none of them reached the browser')
+  assert.ok(world.warnings.some((message) => /refused proxy/.test(message)))
+  // An ordinary one still works.
+  assert.equal(
+    (await client.call('Target.createBrowserContext', { proxyServer: 'http://203.0.113.9:3128' })).error,
+    undefined
+  )
+})
+
+// ---- signing the requests of a run -------------------------------------------------------------------------------------
+
+const sign = (url: string) => ({
+  'signature-agent': '"https://box.test"',
+  'signature-input': `sig1=(${new URL(url).host})`,
+  signature: 'sig1=:abc:'
+})
+
+/**
+ * A hub in front of a fake Chromium, for a run whose requests are signed. `hold` keeps the hub's `Fetch.enable` on the wire
+ * until `release()`: the moment between "the hub attached its own session" and "it is armed", which is what the tab's client
+ * must not be let past.
+ */
+async function signingWorld({
+  signingSetupMs,
+  hold = false,
+  dedicated = false
+}: { signingSetupMs?: number; hold?: boolean; dedicated?: boolean } = {}) {
+  const fake = createFakeChromium()
+  fake.createTarget({ url: 'about:blank' })
+  const warnings: string[] = []
+  const held: string[] = []
+  let holding = hold
+  const scope = createCdpScope({
+    upstream: {
+      send: (text) => {
+        if (holding && JSON.parse(text).method === 'Fetch.enable') held.push(text)
+        else fake.receive(text)
+      }
+    },
+    logger: { warn: (message) => warnings.push(message) },
+    signingSetupMs,
+    dedicated
+  })
+  fake.onMessage(scope.onUpstreamMessage)
+  await scope.start()
+  await fake.flush()
+  return {
+    fake,
+    scope,
+    warnings,
+    release: async () => {
+      holding = false
+      for (const text of held.splice(0)) fake.receive(text)
+      await fake.flush()
+    }
+  }
+}
+
+/** A signing run with a client that has taken over auto-attach, and a tab it opened (announced, still paused). */
+async function signedTab(options: Parameters<typeof signingWorld>[0] = {}) {
+  const world = await signingWorld(options)
+  await world.scope.createRun('slot', { sign })
+  const client = connect(world.scope, world.fake, 'slot')
+  await client.call('Target.setAutoAttach', AUTO_ATTACH)
+  const created = await client.call('Target.createTarget', { url: 'about:blank' })
+  const targetId = created.result.targetId as string
+  const announced = client
+    .events('Target.attachedToTarget')
+    .find((event) => event.params.targetInfo.targetId === targetId)!
+  const clientSession = announced.params.sessionId as string
+  const hubSession = () => world.fake.sessionsOf(targetId).find((id) => id !== clientSession)
+  return { ...world, client, targetId, clientSession, hubSession, created }
+}
+
+const pause = (requestId: string, url: string, headers: Record<string, string> = { accept: '*/*' }) => ({
+  requestId,
+  request: { url, method: 'GET', headers },
+  resourceType: 'Fetch'
+})
+
+test('signing: a new tab is announced at once, and the hub arms a session of its own on it before the client is let run', async () => {
+  const world = await signedTab()
+  const { fake, client, targetId, clientSession } = world
+  // The announcement still comes before the answer to createTarget: nothing about the setup waits in front of it.
+  const announced = client.inbox.findIndex(
+    (m) => m.method === 'Target.attachedToTarget' && m.params.targetInfo.targetId === targetId
+  )
+  assert.ok(announced >= 0 && announced < client.inbox.indexOf(world.created), 'announced before the answer')
+
+  const hub = world.hubSession()!
+  assert.ok(hub, 'the hub attached a session of its own')
+  assert.notEqual(hub, clientSession)
+  const state = fake.sessions.get(hub)!
+  assert.equal(state.fetchEnabled, true, 'request interception is on')
+  assert.deepEqual(fake.commands('Fetch.enable')[0]!.params, {
+    patterns: [{ urlPattern: '*', requestStage: 'Request' }]
+  })
+  assert.deepEqual(state.childAutoAttach, AUTO_ATTACH, 'and it follows frames and workers into other processes')
+
+  // The tab is still paused: only the client's resume lets it run, and it comes after the hub is armed.
+  assert.equal(fake.isPaused(targetId), true)
+  await client.call('Runtime.runIfWaitingForDebugger', {}, clientSession)
+  assert.equal(fake.isPaused(targetId), false)
+  const order = fake.log.map((entry) => `${entry.method}${entry.sessionId === clientSession ? ':client' : ''}`)
+  assert.ok(order.indexOf('Fetch.enable') < order.indexOf('Runtime.runIfWaitingForDebugger:client'), order.join(' '))
+  assert.deepEqual(
+    client.events('Fetch.requestPaused'),
+    [],
+    'and nothing of the hub’s own session ever reaches the client'
+  )
+})
+
+test('signing: until the hub is armed, nothing the client sends on the tab goes through, and then all of it does, in order', async () => {
+  const world = await signedTab({ hold: true })
+  const { fake, client, clientSession } = world
+  const sent = (method: string) =>
+    fake.log.some((entry) => entry.method === method && entry.sessionId === clientSession)
+  const ask = (id: number, method: string, params = {}) =>
+    client.client.handleMessage(JSON.stringify({ id, method, params, sessionId: clientSession }))
+
+  ask(101, 'Page.enable')
+  ask(102, 'Runtime.runIfWaitingForDebugger')
+  ask(103, 'Page.navigate', { url: 'https://example.com/' }) // sent without waiting, as Puppeteer does
+  await fake.flush()
+  assert.ok(
+    !sent('Page.enable') && !sent('Runtime.runIfWaitingForDebugger') && !sent('Page.navigate'),
+    'all of it is held, not only the resume'
+  )
+  assert.equal(fake.isPaused(world.targetId), true)
+  // The browser-level commands of the same client are not: only this tab is waiting.
+  assert.equal((await client.call('Target.getTargets')).error, undefined)
+
+  ask(104, 'Page.reload') // one more while held
+  await world.release()
+  await fake.flush()
+  const order = fake.log.filter((entry) => entry.sessionId === clientSession).map((entry) => entry.method)
+  assert.deepEqual(
+    order,
+    ['Page.enable', 'Runtime.runIfWaitingForDebugger', 'Page.navigate', 'Page.reload'],
+    'in the order they were sent'
+  )
+  assert.deepEqual(
+    client.inbox.filter((m) => [101, 102, 103, 104].includes(m.id)).map((m) => m.id),
+    [101, 102, 103, 104],
+    'and answered in it'
+  )
+  assert.ok(
+    fake.log.findIndex((e) => e.method === 'Fetch.enable') < fake.log.findIndex((e) => e.method === 'Page.enable'),
+    'after the hub was armed'
+  )
+
+  // Once armed and drained, the setup is over: a later command is on its way at once (not a microtask later, behind a
+  // browser-level command sent after it), and in order.
+  ask(105, 'Page.stopLoading')
+  assert.equal(fake.log.filter((entry) => entry.sessionId === clientSession).at(-1)!.method, 'Page.stopLoading')
+  await fake.flush()
+  assert.equal(fake.log.filter((entry) => entry.sessionId === clientSession).at(-1)!.method, 'Page.stopLoading')
+})
+
+test('signing: a tab that cannot be set up in time runs anyway, and says so', async () => {
+  const world = await signedTab({ hold: true, signingSetupMs: 30 })
+  const { fake, client, clientSession } = world
+  client.client.handleMessage(
+    JSON.stringify({ id: 201, method: 'Runtime.runIfWaitingForDebugger', params: {}, sessionId: clientSession })
+  )
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  await fake.flush()
+  assert.equal(fake.isPaused(world.targetId), false, 'the budget ran out, so the tab was let run')
+  assert.ok(world.warnings.some((message) => /took too long/.test(message)))
+  assert.ok(client.inbox.some((m) => m.id === 201 && !m.error))
+
+  // The setup finishing late still arms the hub's session: from then on the tab is signed.
+  await world.release()
+  const hub = world.hubSession()!
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r1', 'https://example.com/'))
+  await fake.flush()
+  assert.ok(
+    fake
+      .commands('Fetch.continueRequest')
+      .some((c) => c.params?.requestId === 'r1' && c.params.headers.some((h: any) => h.name === 'signature'))
+  )
+})
+
+test('signing: a paused request is answered with the signature headers added to its own, and nothing else changed', async () => {
+  const world = await signedTab()
+  const { fake } = world
+  const hub = world.hubSession()!
+  fake.emitSessionEvent(
+    hub,
+    'Fetch.requestPaused',
+    pause('r1', 'https://Shop.Example.com:8443/cart?x=1', {
+      accept: '*/*',
+      'user-agent': 'Chrome',
+      // A page that set its own: replaced, never doubled.
+      Signature: 'sig1=:forged:',
+      'Signature-Input': 'forged',
+      'SIGNATURE-AGENT': 'forged'
+    })
+  )
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r2', 'http://plain.example.com/'))
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r3', 'data:text/html,hi'))
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r4', 'blob:https://example.com/uuid'))
+  await fake.flush()
+
+  const answer = (requestId: string) =>
+    fake.commands('Fetch.continueRequest').filter((c) => c.params?.requestId === requestId)
+  const headersOf = (requestId: string) =>
+    Object.fromEntries(answer(requestId)[0]!.params!.headers.map((h: any) => [h.name, h.value]))
+  assert.deepEqual(headersOf('r1'), {
+    accept: '*/*',
+    'user-agent': 'Chrome',
+    'signature-agent': '"https://box.test"',
+    'signature-input': 'sig1=(shop.example.com:8443)',
+    signature: 'sig1=:abc:'
+  })
+  assert.ok(headersOf('r2')['signature'], 'plain http is signed too')
+  for (const id of ['r3', 'r4']) {
+    assert.equal(answer(id).length, 1, `${id} is answered`)
+    assert.ok(!('headers' in answer(id)[0]!.params!), 'a data: or blob: URL goes on as it is')
+  }
+  for (const id of ['r1', 'r2', 'r3', 'r4']) assert.equal(answer(id).length, 1, `${id} is answered exactly once`)
+  assert.ok(
+    fake.commands('Fetch.continueRequest').every((c) => c.params?.url === undefined),
+    'the URL is never changed'
+  )
+})
+
+test('signing: a request that cannot be signed still goes out, once, and the hub says so', async () => {
+  const world = await signingWorld()
+  await world.scope.createRun('slot', {
+    sign: () => {
+      throw new Error('the key is gone')
+    }
+  })
+  const client = connect(world.scope, world.fake, 'slot')
+  await client.call('Target.setAutoAttach', AUTO_ATTACH)
+  const created = await client.call('Target.createTarget', { url: 'about:blank' })
+  const hub = world.fake.sessionsOf(created.result.targetId).find((id) => !client.attachedSessions().includes(id))!
+  world.fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r1', 'https://example.com/'))
+  await world.fake.flush()
+  const answers = world.fake.commands('Fetch.continueRequest')
+  assert.equal(answers.length, 1)
+  assert.ok(!('headers' in answers[0]!.params!), 'unsigned, and the request still goes')
+  assert.ok(world.warnings.some((message) => /could not be signed/.test(message)))
+})
+
+test('signing: frames in other processes are armed as they appear, workers are only let run, and a paused one is never left', async () => {
+  const world = await signedTab()
+  const { fake } = world
+  const hub = world.hubSession()!
+
+  const frame = fake.addChildSession(hub, { type: 'iframe' })
+  const worker = fake.addChildSession(hub, { type: 'worker' })
+  await fake.flush()
+  assert.equal(fake.sessions.get(frame)!.fetchEnabled, true, 'a frame is armed')
+  assert.deepEqual(fake.sessions.get(frame)!.childAutoAttach, AUTO_ATTACH, 'and so are the frames inside it')
+  assert.equal(fake.sessions.get(frame)!.paused, false, 'and let run')
+  assert.equal(fake.sessions.get(worker)!.fetchEnabled, false, 'a worker has no interception of its own')
+  assert.equal(fake.sessions.get(worker)!.paused, false, 'but it is let run: it would be frozen otherwise')
+
+  fake.emitSessionEvent(frame, 'Fetch.requestPaused', pause('rf', 'https://b.example.com/sub'))
+  await fake.flush()
+  const answered = fake.commands('Fetch.continueRequest').find((c) => c.params?.requestId === 'rf')!
+  assert.equal(answered.sessionId, frame, 'answered on the session that paused it')
+  assert.ok(answered.params!.headers.some((h: any) => h.name === 'signature'))
+
+  const inner = fake.addChildSession(frame, { type: 'iframe' })
+  await fake.flush()
+  assert.equal(fake.sessions.get(inner)!.fetchEnabled, true, 'a frame inside a frame too')
+  assert.deepEqual(
+    world.client.events('Target.attachedToTarget').filter((e) => [frame, worker, inner].includes(e.params.sessionId)),
+    [],
+    'the client never sees the hub’s children'
+  )
+})
+
+test('signing: a tab nobody drives (a popup, no client in control) is let run only after the hub has armed it', async () => {
+  const world = await signingWorld({ hold: true })
+  await world.scope.createRun('slot', { sign })
+  // The run's context has a tab appear with no client attached: the hub is the only one that sees it.
+  const { contextId } = world.fake.contexts.size
+    ? { contextId: [...world.fake.contexts.keys()].at(-1)! }
+    : { contextId: '' }
+  const targetId = world.fake.createTarget({ url: 'about:blank', browserContextId: contextId })
+  await world.fake.flush()
+  assert.equal(world.fake.isPaused(targetId), true, 'held while the hub arms it')
+  await world.release()
+  await world.fake.flush()
+  assert.equal(world.fake.isPaused(targetId), false, 'then let run, though nobody drives it')
+  const attachments = world.fake.sessionsOf(targetId)
+  assert.equal(attachments.length, 1, 'the hub’s own session is the one left on it')
+  assert.equal(world.fake.sessions.get(attachments[0]!)!.fetchEnabled, true)
+})
+
+test('signing: the hub’s session outlives a client, a client that leaves while a tab is being armed does not freeze it, and the run’s end detaches it', async () => {
+  const world = await signedTab({ hold: true })
+  const { fake, client, clientSession, targetId } = world
+  client.client.close()
+  await fake.flush()
+  assert.equal(fake.isPaused(targetId), true, 'still held: the hub is not armed yet')
+  await world.release()
+  assert.equal(fake.isPaused(targetId), false, 'then let run, though its client is gone')
+  assert.ok(!fake.sessions.has(clientSession), 'and the client’s session let go')
+  const hub = fake.sessionsOf(targetId)[0]!
+  assert.equal(
+    fake.sessions.get(hub)!.fetchEnabled,
+    true,
+    'the hub’s own stays: the tab is signed with nobody connected'
+  )
+
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r1', 'https://example.com/'))
+  await fake.flush()
+  assert.equal(fake.commands('Fetch.continueRequest').length, 1)
+
+  await world.scope.disposeRun('slot')
+  await fake.flush()
+  assert.ok(!fake.sessions.has(hub), 'the run’s end detaches the hub’s session')
+  assert.ok(
+    fake.commands('Target.detachFromTarget').some((entry) => entry.params?.sessionId === hub),
+    'by asking for it, and not only by the tab going away with its context'
+  )
+  fake.emitSessionEvent(hub, 'Fetch.requestPaused', pause('r2', 'https://example.com/'))
+  await fake.flush()
+  assert.equal(fake.commands('Fetch.continueRequest').length, 1, 'and nothing of it is answered after')
+})
+
+test('signing: a run without a signer is as it always was, and one tab of a signing run does not affect another run', async () => {
+  const world = await signingWorld()
+  await world.scope.createRun('plain')
+  const client = connect(world.scope, world.fake, 'plain')
+  await client.call('Target.setAutoAttach', AUTO_ATTACH)
+  const created = await client.call('Target.createTarget', { url: 'about:blank' })
+  assert.equal(world.fake.commands('Target.attachToTarget').length, 0, 'no session of the hub’s own for a plain run')
+  assert.equal(world.fake.commands('Fetch.enable').length, 0)
+  assert.equal(world.fake.sessionsOf(created.result.targetId).length, 1)
+  const session = client.attachedSessions()[0]!
+  // Commands on a plain tab are not queued behind anything.
+  client.client.handleMessage(JSON.stringify({ id: 301, method: 'Page.enable', params: {}, sessionId: session }))
+  assert.ok(
+    world.fake.log.some((entry) => entry.method === 'Page.enable'),
+    'forwarded in the same turn'
+  )
+})
+
+test('dedicated: a context the client makes is signed like the run’s own', async () => {
+  const world = await signingWorld({ dedicated: true })
+  await world.scope.createRun('slot', { sign })
+  const client = connect(world.scope, world.fake, 'slot')
+  await client.call('Target.setAutoAttach', AUTO_ATTACH)
+  const extra = (await client.call('Target.createBrowserContext')).result.browserContextId as string
+  const tab = await client.call('Target.createTarget', { url: 'about:blank', browserContextId: extra })
+  const targetId = tab.result.targetId as string
+  const hub = world.fake.sessionsOf(targetId).find((id) => !client.attachedSessions().includes(id))
+  assert.ok(hub, 'armed')
+  assert.equal(world.fake.sessions.get(hub!)!.fetchEnabled, true)
 })

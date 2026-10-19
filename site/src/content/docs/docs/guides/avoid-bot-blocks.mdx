@@ -1,0 +1,226 @@
+---
+title: Avoid bot blocks
+description: What a website sees when your browser comes from a box, what browserbay fixes by itself, and what is left for you.
+---
+
+import { Aside, TabItem, Tabs } from '@astrojs/starlight/components'
+
+Sites that block bots look at three things: **what the browser says about itself**, **where the traffic comes from**, and **how the visitor behaves**. A box can only do something about the first two, and it does the first one by default.
+
+browserbay stays a raw box. It does not fake a browser: no spoofed user agent, no forged WebGL or canvas values, no stealth scripts injected into pages. Values that disagree with each other (a Windows user agent on a Linux machine) are easier to spot than an honest browser. What the box does is stop announcing that it is automated, and give you the controls for the network side.
+
+## What a site sees
+
+This is what a page read from a slot of the default image, before and after the box stopped announcing itself.
+
+| Signal                      | A headless browser says          | The image's default says           |
+| --------------------------- | -------------------------------- | ---------------------------------- |
+| `navigator.userAgent`       | `…HeadlessChrome/151…`           | `…Chrome/151…`                     |
+| `User-Agent` header         | `HeadlessChrome`                 | `Chrome`                           |
+| Client hints (`brands`)     | the same name                    | `Chromium`, without `Headless`     |
+| `navigator.webdriver`       | `true`                           | `false`                            |
+| `screen` against the window | 800×600 inside a 1280×900 window | 1920×1080 inside a 1280×900 window |
+
+## What the box does by default
+
+- **Runs Chromium headful on a virtual display.** The Docker image sets `BROWSERBAY_HEADLESS=xvfb`: the node starts an Xvfb and Chromium opens on it. A headful Chromium has no `HeadlessChrome` in its user agent or client hints, and a screen as big as its window. Nothing is faked: it is the same browser.
+- **Turns `navigator.webdriver` off.** Driving a browser over DevTools turns it on, and any page can read it. The node starts Chromium with `--disable-blink-features=AutomationControlled`. Set `BROWSERBAY_WEBDRIVER_FLAG=keep` on a node whose browser should say what it is.
+- **Keeps the virtual display private.** The display needs a cookie to connect to, and only the node and its browser have it, so another process in the same container or pod cannot watch or drive your pages. With `BROWSERBAY_ISOLATION=process` each slot gets a display of its own, so slots do not share a clipboard.
+
+### What it costs
+
+A headful node uses more memory: about 65 MB more for Chromium, and about 80 MB for each virtual display. That is one display per node by default, and one per slot with `BROWSERBAY_ISOLATION=process`. Set `BROWSERBAY_HEADLESS=true` (and `node.headless=true` in the Helm chart) to go back to headless. A node on bare metal without Xvfb stays headless, because that is the default outside the image.
+
+A headful Chromium only paints the tab in front of its window: see [Watching a headful node](/docs/guides/live-view/#watching-a-headful-node).
+
+## Check what your slot shows
+
+The repository has a script that takes a slot, opens a tab over DevTools and reads those signals, and exits with an error if the browser says `HeadlessChrome`, has `navigator.webdriver` on, or has a screen smaller than its window. It needs only Node.
+
+```sh
+node scripts/smoke-box.mjs https://browsers.example.com "$BROWSERBAY_API_KEY"
+```
+
+Pass `--headless` for a node you run headless on purpose. CI runs it against the image it builds.
+
+## Send a slot's traffic through a proxy
+
+A datacenter address is the most common reason a good-looking browser is blocked. Give a slot a proxy, and its traffic leaves from the proxy's address.
+
+<Tabs>
+  <TabItem label="Node">
+
+```js
+const slot = await box.acquire({
+  runId: 'task-42',
+  maxLifetimeSeconds: 1800,
+  proxy: { server: 'http://proxy.example.com:8080', username: 'user', password: process.env.PROXY_PASSWORD }
+})
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from browserbay import Proxy
+
+slot = box.acquire(
+    run_id="task-42", max_lifetime_seconds=1800,
+    proxy=Proxy("http://proxy.example.com:8080", username="user", password=os.environ["PROXY_PASSWORD"]),
+)
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+slot, err := box.Acquire(ctx, browserbay.AcquireOptions{
+    RunID: "task-42", MaxLifetime: 30 * time.Minute,
+    Proxy: &browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "user", Password: os.Getenv("PROXY_PASSWORD")},
+})
+```
+
+  </TabItem>
+</Tabs>
+
+`server` is `http://`, `https://` or `socks5://` with `host:port`. `bypass` takes Chromium's list of hosts that go direct. Many proxy providers pick a sticky exit address from the user name, so one slot keeps one address.
+
+**How it works.** Chromium takes a proxy per browser context, but no credentials for it over DevTools, and it speaks no SOCKS5 sign-in. So the node does not give Chromium your proxy. It starts a small forwarder for the slot, on its own loopback, and gives Chromium that. The forwarder opens each connection to your proxy itself and adds the credentials there.
+
+- **The browser never holds the credentials,** so a page cannot read them, and a proxy that refuses them is a page that fails to load, not a login prompt.
+- **Where the password goes.** From your service to the relay (over TLS, if you serve it over HTTPS) to the one node that makes the browser, and into memory there for the life of the slot. The relay keeps it in no table and logs nothing of it. See [Trust and isolation](/docs/security/trust/#proxy-credentials).
+- **A proxy at loopback, `169.254.169.254` or any other address of the node itself is refused,** however it is spelled, and so is a name that resolves to one. A slot's proxy must be somewhere a slot may go. (Addresses on your own private network are fine.)
+- **Loopback is not exempt.** A slot on a proxy sends requests for `localhost` through the proxy too, so its pages cannot reach the node's own services.
+- **A context your client makes** (`browser.newContext()`, on a node with `BROWSERBAY_ISOLATION=process`) uses the slot's proxy unless you name another by IP address (a host name is refused: it could point at the node itself).
+
+<Aside type="caution" title="Use process isolation for proxied slots">
+  WebRTC can send UDP past a proxy, to a STUN server, and tell a page the node's real address. A node with a Chromium
+  per slot (`BROWSERBAY_ISOLATION=process`) starts a proxied slot's browser with a WebRTC policy that stops it. One
+  shared Chromium cannot set that per slot, so on a shared node a proxied slot can still leak its node's address through
+  WebRTC.
+</Aside>
+
+Plain `http://` pages go through a SOCKS tunnel as `CONNECT` to port 80, which an HTTP proxy must allow. A proxy on a private address needs `extraEgress` if you use the Helm chart's `node.networkPolicy`.
+
+## Run a node on a home or office connection
+
+The strongest address is one that is not a datacenter's. A node only ever dials **out** to the relay, so it can run on a machine behind a home router with no open port: your office desktop, a mini PC, a Raspberry Pi. Run one there, and ask for it.
+
+```sh
+# on the home machine
+docker run -d --name browserbay-node --restart always --init \
+  -e BROWSERBAY_RELAY_URL=https://browsers.example.com \
+  -e BROWSERBAY_ENROLLMENT_SECRET=... \
+  -e BROWSERBAY_NODE_ID=home-1 \
+  -e BROWSERBAY_NODE_LABELS=residential \
+  -e BROWSERBAY_NODE_EXCLUSIVE=true \
+  ghcr.io/degoke/browserbay node
+```
+
+```js
+const slot = await box.acquire({ runId: 'task-42', maxLifetimeSeconds: 1800, nodeLabels: ['residential'] })
+```
+
+- **`BROWSERBAY_NODE_LABELS`** names the node. A slot that asks for `nodeLabels` is only placed on a node with all of them.
+- **`BROWSERBAY_NODE_EXCLUSIVE=true`** keeps the node for those slots. Without it, the box's ordinary slots fill it too.
+- **No such node is a quick `422`,** not a long wait: `UnsupportedError` says no node carries the label. (Just after the relay restarts it waits as usual for nodes that are reconnecting.)
+- **Mind what the machine can reach.** A slot can browse your home or office network ([Trust and isolation](/docs/security/trust/)). Run it on a machine, VLAN or network with nothing you mind a page reaching.
+
+## Set a time zone and language
+
+A browser in Berlin that reports UTC and `en-US` is a tell. A node running `BROWSERBAY_ISOLATION=process` can give each slot its own:
+
+```js
+const slot = await box.acquire({
+  runId: 'task-42',
+  maxLifetimeSeconds: 1800,
+  timezone: 'Europe/Berlin',
+  locale: 'de-DE'
+})
+```
+
+The slot's `navigator.language`, `navigator.languages`, `Accept-Language` header and `Intl` time zone then say `de-DE` and `Europe/Berlin`. Match them to the proxy's country. A box whose nodes share one Chromium cannot do this per slot, and `acquire` throws `UnsupportedError` at once rather than make a slot in the wrong zone.
+
+## Identify your box to sites
+
+Everything above makes a browser look ordinary. This does the opposite, and for some sites it works better: the box **says who it is**. Sites and CDNs that block bots can also choose to let known ones in, and the way a bot makes itself known is to sign its requests ([Web Bot Auth](https://datatracker.ietf.org/doc/draft-ietf-webbotauth-httpsig-protocol/), built on HTTP Message Signatures, RFC 9421) with a key whose public half it publishes. The box can sign every request its browsers make.
+
+<Aside type="caution" title="It declares a bot, and whose">
+  A signed browser is not hidden: it tells every site that it is automated, and the address of the box that runs it. A
+  site that blocks all bots will block it by name. Use it for sites that have a way to say yes (Cloudflare's verified
+  bots, a partner's allowlist), and sign only the slots that need it.
+</Aside>
+
+**Set it up once.**
+
+1. **Make a key.** `docker run --rm ghcr.io/degoke/browserbay web-bot-auth` prints a private key and its id. It is shown once: keep it like a password.
+2. **Give the relay the key** (`BROWSERBAY_WEB_BOT_AUTH_KEY`), and serve the relay over HTTPS **at the root of its own hostname**, such as `https://browsers.example.com`. The relay then publishes the public key at `/.well-known/http-message-signatures-directory` on that host, where a site looks for it.
+3. **Give each node that signs** the key, the address, and a mode: `BROWSERBAY_WEB_BOT_AUTH=optional` (sign the slots that ask), `BROWSERBAY_WEB_BOT_AUTH_KEY`, and `BROWSERBAY_WEB_BOT_AUTH_AGENT=https://browsers.example.com`. In Kubernetes, set `webBotAuth.*` in the chart. `always` signs every slot instead.
+4. **Ask for it.** `acquire({ signRequests: true })` (`sign_requests=True`, `SignRequests: &yes`). A slot that asks is only placed on a node that signs with the key the relay publishes. One that does not ask is not signed, on an `optional` node.
+5. **Register with the site's verifier.** For Cloudflare, submit the directory address in its bot submission form with "Request Signature" as the verification method: its documentation is the reference, and the menu moves. Until a site knows your key, it sees a signed request from an unknown bot.
+
+Check what the relay publishes with `curl https://browsers.example.com/.well-known/http-message-signatures-directory`: it is a JWKS with your public key, and its `kid` is the id the command printed.
+
+**What is signed.** Every `http` and `https` request a signed slot's pages make, as it is made: navigations, images, scripts, `fetch` and XHR (including cross-origin ones, with no CORS preflight, because the headers are added after the browser's own check), each hop of a redirect (signed for the host it goes to), popups, frames (including ones in other processes) and requests from dedicated workers. This was measured against real Chromium. The repository's browser tests verify navigations, subresources, cross-origin requests, redirects, popups and frames with Cloudflare's own library, and its hub tests cover the frames that live in other processes.
+
+**What is not.**
+
+- **WebSocket handshakes** never pass through request interception, so they go unsigned.
+- **The first request of a tab opened with a URL** through `Target.createTarget({ url })`. The browser starts it before anything can attach. Playwright and Puppeteer open a blank tab and then navigate, which is signed; so are popups.
+- **Requests of workers inside frames from another site, and of service and shared workers.**
+- **A request your own interception changes after the box signed it.**
+
+**Adding headers of your own.** Use `context.setExtraHTTPHeaders({ ... })`. If you route requests, call `route.continue()` or `route.fallback()` without a `headers` option. A client that replaces a request's whole header set (`route.continue({ headers: { ...route.request().headers(), x: '1' } })`) wins over the box, and on a redirect Playwright hands back the previous hop's headers, so the second hop carries the first hop's signature, which is for another host and fails to verify.
+
+`BROWSERBAY_WEB_BOT_AUTH_FORMAT` chooses how `Signature-Agent` is written: `legacy` (the default) is the quoted string Cloudflare's verifier accepts, and `dictionary` is the IETF draft's. Cloudflare's rejected the draft's in October 2026. Signatures last 60 seconds by default (`BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS`).
+
+## Keep a session between runs
+
+A site that has checked your browser once usually does not check it again for a while: it hands the browser a clearance cookie (`cf_clearance`, `datadome`, `_abck` and the like), and a signed-in session is a cookie too. Running the check again on every run is what makes a flow slow and flaky. So keep the session. The box adds nothing for this, because cookies are the slot's own and your driver already reaches them.
+
+**Keep the slot.** A slot lives up to `maxLifetimeSeconds` (at most 24 hours), and [a saved slot](/docs/guides/hand-off/) comes back with its pages, cookies and storage as they were:
+
+```js
+const saved = JSON.stringify(slot) // keep it like a secret: it holds the slot token
+// ... later, in another process
+const slot = box.slot(JSON.parse(saved))
+const browser = await chromium.connectOverCDP(slot.cdpUrl, { headers: slot.headers })
+```
+
+**Or move the cookies to a new slot.** Take them out with your driver, and put them in before the first request:
+
+```js
+// at the end of a run
+const cookies = await context.cookies() // HttpOnly ones too
+const storage = await page.evaluate(() => ({ ...localStorage }))
+await db.save(identity, { cookies, storage }) // cookies are credentials: encrypt them
+
+// at the start of the next, in a slot of its own
+const saved = await db.load(identity)
+await context.addCookies(saved.cookies)
+await context.addInitScript(
+  ([origin, values]) => {
+    if (location.origin === origin) for (const [k, v] of Object.entries(values)) localStorage.setItem(k, v)
+  },
+  [origin, saved.storage]
+)
+```
+
+A clearance cookie is bound to what it was issued to, so it only works again when the slot looks the same to the site:
+
+- **The same exit address.** Use a sticky proxy session (often chosen by the user name), or the same node. A cookie from one address presented from another is refused.
+- **The same browser.** The user agent and the Chromium version should match: keep the same image tag between runs.
+- **Keep identities apart.** One cookie jar per identity, never shared between unrelated users or sites you run for different parties.
+
+## What is left, and what to do about it
+
+<Aside type="note" title="The address matters most">
+  A browser that looks like Chrome from a data center address is still a data center address. On a protected site, the
+  address is usually what decides the outcome.
+</Aside>
+
+- **WebGL reports a software renderer.** The image has no GPU, so a page reading the WebGL renderer sees SwiftShader. A node on a machine with a GPU does not.
+- **The time zone is UTC** unless you set one: [`timezone` and `locale`](#set-a-time-zone-and-language) on a node with a Chromium per slot, or `TZ` for a whole node.
+- **Behaviour.** A script that clicks at machine speed, never moves the mouse and loads fifty pages a second looks like a bot whatever the browser says.
+- **Sites that do not know you.** Signing only helps with a site that has a way to let a known bot in. Elsewhere it is a bot announcing itself.
+- **CAPTCHAs.** A CAPTCHA is a site asking for a person. browserbay does not solve them. A person can: see [Live view](/docs/guides/live-view/) and [Hand off and clean up](/docs/guides/hand-off/).

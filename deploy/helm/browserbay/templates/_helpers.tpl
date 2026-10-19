@@ -59,11 +59,43 @@ app.kubernetes.io/component: {{ .component }}
 {{- default (include "browserbay.fullname" .) .Values.auth.existingSecret -}}
 {{- end -}}
 
-{{/* Fails the render when mode is not one of the two. */}}
+{{/* webBotAuth.mode as one of off, optional, always. YAML reads an unquoted `off` as false, so false means off. */}}
+{{- define "browserbay.signingMode" -}}
+{{- $mode := toString .Values.webBotAuth.mode -}}
+{{- if eq $mode "false" -}}off{{- else -}}{{- $mode -}}{{- end -}}
+{{- end -}}
+
+{{/* Fails the render when mode is not one of the two, or webBotAuth is asked for without what it needs. */}}
 {{- define "browserbay.validate" -}}
 {{- if not (has .Values.mode (list "split" "allInOne")) -}}
 {{- fail (printf "mode must be \"split\" or \"allInOne\", got %q" (toString .Values.mode)) -}}
 {{- end -}}
+{{- $signing := include "browserbay.signingMode" . -}}
+{{- if not (has $signing (list "off" "optional" "always")) -}}
+{{- fail (printf "webBotAuth.mode must be \"off\", \"optional\" or \"always\", got %q" $signing) -}}
+{{- end -}}
+{{- if ne $signing "off" -}}
+{{- if not (regexMatch "^https://[^/]+$" (toString .Values.webBotAuth.agentUrl)) -}}
+{{- fail "webBotAuth.agentUrl must be the https address the relay is served at, with no path, such as https://browsers.example.com" -}}
+{{- end -}}
+{{- if and (not .Values.webBotAuth.key) (not .Values.webBotAuth.existingSecret) -}}
+{{- fail "webBotAuth needs a key: set webBotAuth.existingSecret (a Secret you manage), or webBotAuth.key. Make one with `docker run --rm ghcr.io/degoke/browserbay web-bot-auth`" -}}
+{{- end -}}
+{{- if and .Values.webBotAuth.key .Values.webBotAuth.existingSecret -}}
+{{- fail "set webBotAuth.key or webBotAuth.existingSecret, not both" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The Web Bot Auth private key, from the Secret that holds it. Empty when nothing is signed. The relay publishes its public half, nodes sign with it. */}}
+{{- define "browserbay.webBotAuthKeyEnv" -}}
+{{- if ne (include "browserbay.signingMode" .) "off" }}
+- name: BROWSERBAY_WEB_BOT_AUTH_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ default (printf "%s-web-bot-auth" (include "browserbay.fullname" .)) .Values.webBotAuth.existingSecret }}
+      key: {{ .Values.webBotAuth.existingSecretKey }}
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -90,4 +122,23 @@ Service: a node refuses plain http to another machine unless that opt-in says th
   value: {{ .Values.node.sandbox | toString | quote }}
 - name: BROWSERBAY_HEADLESS
   value: {{ .Values.node.headless | toString | quote }}
+{{- with .Values.node.labels }}
+- name: BROWSERBAY_NODE_LABELS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- if .Values.node.exclusive }}
+- name: BROWSERBAY_NODE_EXCLUSIVE
+  value: "true"
+{{- end }}
+{{- if ne (include "browserbay.signingMode" .) "off" }}
+- name: BROWSERBAY_WEB_BOT_AUTH
+  value: {{ include "browserbay.signingMode" . | quote }}
+- name: BROWSERBAY_WEB_BOT_AUTH_AGENT
+  value: {{ .Values.webBotAuth.agentUrl | toString | quote }}
+- name: BROWSERBAY_WEB_BOT_AUTH_FORMAT
+  value: {{ .Values.webBotAuth.format | toString | quote }}
+- name: BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS
+  value: {{ int .Values.webBotAuth.ttlSeconds | toString | quote }}
+{{- include "browserbay.webBotAuthKeyEnv" . | nindent 0 }}
+{{- end }}
 {{- end -}}

@@ -14,9 +14,11 @@ from browserbay import (
     ForbiddenError,
     NodeSummary,
     NoCapacityError,
+    Proxy,
     QuotaExceededError,
     Slot,
     SlotSummary,
+    UnsupportedError,
 )
 
 from fakebox import API_KEY, TOKEN_HEADER, FakeBox
@@ -520,6 +522,158 @@ class ListAndNodesTests(BoxTestCase):
         self.assertEqual([n.node_id for n in nodes], ["bare", "ok"], "bad counts and a missing id are skipped")
         self.assertEqual((nodes[0].max_contexts, nodes[0].contexts), (0, 0), "a missing count is 0")
         self.assertEqual((nodes[1].max_contexts, nodes[1].contexts, nodes[1].draining), (5, 2, True))
+
+
+PASSWORD = "python-client-must-not-show-this-password"
+
+
+class SlotOptionTests(BoxTestCase):
+    def test_a_proxy_a_time_zone_a_language_and_node_labels_are_sent_when_asked_for(self) -> None:
+        fake = self.box(modern=True)
+        proxy = Proxy("http://proxy.example.com:8080", "user", PASSWORD, "*.internal.test")
+        slot = self.acquire(
+            self.client(fake), proxy=proxy, timezone="Europe/Berlin", locale="de-DE", node_labels=["home", "eu"]
+        )
+        self.assertEqual(
+            fake.calls[0].body,
+            {
+                "runId": "run-1",
+                "maxLifetimeSeconds": 3000,
+                "waitMs": 30_000,
+                "proxy": {
+                    "server": "http://proxy.example.com:8080",
+                    "username": "user",
+                    "password": PASSWORD,
+                    "bypass": "*.internal.test",
+                },
+                "timezone": "Europe/Berlin",
+                "locale": "de-DE",
+                "nodeLabels": ["home", "eu"],
+            },
+        )
+        self.assertNotIn(PASSWORD, json.dumps(slot.to_dict()), "a stored slot has no proxy credential")
+
+        # A dict works as well as a Proxy, only what is asked for is sent, and an empty list of labels is no labels.
+        again = self.box(modern=True)
+        self.acquire(self.client(again), proxy={"server": "socks5://10.0.0.7:1080"}, node_labels=[])
+        self.assertEqual(again.calls[0].body["proxy"], {"server": "socks5://10.0.0.7:1080"})
+        self.assertNotIn("nodeLabels", again.calls[0].body)
+        self.assertNotIn("timezone", again.calls[0].body)
+
+    def test_a_plain_request_is_the_one_a_box_has_always_taken(self) -> None:
+        fake = self.box()  # an old box: it says nothing of what it applied
+        self.acquire(self.client(fake))
+        self.assertEqual(fake.calls[0].body, {"runId": "run-1", "maxLifetimeSeconds": 3000, "waitMs": 30_000})
+        self.assertEqual(len(fake.slots), 1, "and nothing was refused for the box being old")
+
+    def test_a_box_that_predates_the_options_would_make_a_plain_browser_so_it_is_released_and_the_ask_refused(self) -> None:
+        fake = self.box()
+        with self.assertRaises(UnsupportedError) as caught:
+            self.acquire(self.client(fake), proxy=Proxy("http://proxy.example.com:8080", "u", PASSWORD))
+        self.assertIsInstance(caught.exception, BrowserBayError)
+        self.assertRegex(str(caught.exception), r"did not apply proxy.*older")
+        self.assertNotIn(PASSWORD, str(caught.exception))
+        self.assertEqual([c.method for c in fake.calls], ["POST", "DELETE"], "the browser made without it was released")
+        self.assertEqual(fake.slots, {})
+
+    def test_a_box_that_applied_only_some_is_refused_too_and_says_which(self) -> None:
+        fake = self.box(create_body={"slotId": "slot-9", "token": "t", "nodeId": "n", "applied": ["timezone"]})
+        with self.assertRaisesRegex(UnsupportedError, "did not apply proxy, locale"):
+            self.acquire(self.client(fake), proxy={"server": "http://p.example:1"}, timezone="UTC", locale="fr")
+        self.assertEqual([(c.method, c.path) for c in fake.calls], [("POST", "/v1/slots"), ("DELETE", "/v1/slots/slot-9")])
+
+    def test_when_the_browser_cannot_be_released_it_says_so_and_still_refuses(self) -> None:
+        fake = self.box(delete_status=lambda _: 500)
+        with self.assertLogs("browserbay", level="WARNING") as logged:
+            with self.assertRaises(UnsupportedError):
+                self.acquire(self.client(fake), proxy=Proxy("http://p.example:1", "u", PASSWORD))
+        self.assertNotIn(PASSWORD, "\n".join(logged.output))
+
+    def test_422_says_what_no_node_offers_and_400_says_what_was_wrong(self) -> None:
+        unsupported = self.box(create_status=422, create_body={"error": "unsupported", "message": "No node offers proxy"})
+        with self.assertRaises(UnsupportedError) as caught:
+            self.acquire(self.client(unsupported), proxy=Proxy("http://p.example:1", "u", PASSWORD))
+        self.assertEqual(caught.exception.status, 422)
+        self.assertIn("No node offers proxy", str(caught.exception))
+        self.assertNotIn(PASSWORD, str(caught.exception))
+        self.assertEqual(len(unsupported.calls), 1, "nothing was made, so nothing is released")
+
+        refused = self.box(create_status=400, create_body={"error": "invalid_request", "message": "proxy.server must be http://host:port"})
+        with self.assertRaises(BrowserBayError) as bad:
+            self.acquire(self.client(refused), proxy={"server": "nope"})
+        self.assertNotIsInstance(bad.exception, UnsupportedError)
+        self.assertEqual(bad.exception.status, 400)
+        self.assertIn("proxy.server must be", str(bad.exception))
+        with self.assertRaisesRegex(BrowserBayError, r"refused the request \(400\)$"):
+            self.acquire(self.client(self.box(create_status=400)))
+
+    def test_options_of_the_wrong_type_are_refused_before_anything_is_sent(self) -> None:
+        fake = self.box(modern=True)
+        service = self.client(fake)
+        for kwargs in [
+            {"proxy": "http://proxy.example.com:8080"},
+            {"proxy": {}},
+            {"proxy": {"server": 5}},
+            {"proxy": {"server": "http://p.example:1", "password": 5}},
+            {"timezone": 5},
+            {"locale": b"de"},
+            {"node_labels": "home"},
+            {"node_labels": [1]},
+        ]:
+            with self.assertRaises(TypeError, msg=repr(kwargs)):
+                self.acquire(service, **kwargs)
+        self.assertEqual(fake.calls, [])
+
+    def test_sign_requests_is_sent_when_asked_for_false_included_and_an_old_box_is_refused(self) -> None:
+        fake = self.box(modern=True)
+        self.acquire(self.client(fake), sign_requests=True)
+        self.assertIs(fake.calls[0].body["signRequests"], True)  # type: ignore[index]
+        off = self.box(modern=True)
+        self.acquire(self.client(off), sign_requests=False)
+        self.assertIs(off.calls[0].body["signRequests"], False, "false is an ask, not the same as leaving it out")  # type: ignore[index]
+        unset = self.box(modern=True)
+        self.acquire(self.client(unset))
+        self.assertNotIn("signRequests", unset.calls[0].body)  # type: ignore[arg-type]
+
+        old = self.box()  # predates the options
+        with self.assertRaisesRegex(UnsupportedError, "did not apply signRequests"):
+            self.acquire(self.client(old), sign_requests=True)
+        self.assertEqual(old.slots, {}, "the unsigned browser it made was released")
+
+        for value in ["true", 1, {}]:
+            with self.assertRaises(TypeError, msg=repr(value)):
+                self.acquire(self.client(fake), sign_requests=value)  # type: ignore[arg-type]
+
+    def test_a_proxys_repr_hides_its_password(self) -> None:
+        proxy = Proxy("http://proxy.example.com:8080", "user", PASSWORD)
+        for text in (repr(proxy), str(proxy), f"{proxy}", repr([proxy]), repr({"p": proxy})):
+            self.assertNotIn(PASSWORD, text)
+        self.assertIn("password='***'", repr(proxy))
+        self.assertIn("password=None", repr(Proxy("http://p.example:1")))
+        self.assertEqual(proxy.to_dict()["password"], PASSWORD, "it is hidden from logs, not from the request")
+        self.assertEqual(Proxy("http://p.example:1").to_dict(), {"server": "http://p.example:1"})
+
+    def test_nodes_say_what_they_can_do_what_they_are_called_and_whether_they_are_kept_for_their_labels(self) -> None:
+        fake = self.box(
+            nodes=[
+                {
+                    "nodeId": "home",
+                    "maxContexts": 2,
+                    "contexts": 1,
+                    "draining": False,
+                    "lastSeenAt": "t",
+                    "features": ["proxy", 5, "locale"],
+                    "labels": ["home"],
+                    "exclusive": True,
+                },
+                {"nodeId": "old", "maxContexts": 2, "contexts": 0},
+                {"nodeId": "odd", "features": "proxy", "labels": {"a": 1}},
+            ]
+        )
+        home, old, odd = self.client(fake).nodes()
+        self.assertEqual((home.features, home.labels, home.exclusive), (("proxy", "locale"), ("home",), True))
+        self.assertEqual((old.features, old.labels, old.exclusive), ((), (), False), "a box that predates them sends none")
+        self.assertEqual((odd.features, odd.labels), ((), ()), "something that is not a list is none")
 
 
 class ReapTests(BoxTestCase):

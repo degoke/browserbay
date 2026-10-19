@@ -1,5 +1,7 @@
 node:
   relayUrl: https://browsers.example.com
+  labels: [residential, eu]
+  exclusive: true
   autoscaling:
     enabled: true
   networkPolicy:
@@ -16,3 +18,7 @@ relay:
     tls:
       - secretName: browsers-tls
         hosts: [browsers.example.com]
+webBotAuth:
+  mode: optional
+  agentUrl: https://browsers.example.com
+  existingSecret: my-web-bot-auth

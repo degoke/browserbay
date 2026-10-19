@@ -93,17 +93,19 @@ conn, _, err := websocket.DefaultDialer.DialContext(ctx, slot.CDPURL, slot.Heade
 
 ## What the client does
 
-| Call                                   | Does                                                                                                     |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `box.Acquire(ctx, opts)`               | Takes a browser. `ErrNoCapacity` when the box stays full for the whole `Wait` (default 30 s).            |
-| `box.Slot(stored)`                     | A slot from what you saved earlier. Makes no request.                                                    |
-| `box.Release(ctx, slotID)`             | Releases a slot you only know the id of. `box.ReleaseAt(ctx, boxURL, slotID)` for one on another box.    |
-| `box.List(ctx)`                        | Slots (this namespace's, if you set one), with their run ids.                                            |
-| `box.Nodes(ctx)`                       | Nodes and their load.                                                                                    |
-| `box.Reap(ctx, opts)`                  | Releases slots whose run `IsLive` says is gone; returns how many. Young slots (`Grace`, 3 min) are kept. |
-| `slot.IsAlive(ctx)`                    | Never fails: asks twice, and a box that cannot be asked counts as "not alive".                           |
-| `slot.Release(ctx)`                    | Closes the browser. Idempotent.                                                                          |
-| `json.Marshal(slot)` / `slot.Stored()` | What to save to come back to the browser later. It holds the slot token: store it like a secret.         |
+| Call                                   | Does                                                                                                                                                                     |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `box.Acquire(ctx, opts)`               | Takes a browser. `ErrNoCapacity` when the box stays full for the whole `Wait` (default 30 s), `ErrUnsupported` when options were asked for and the box cannot give them. |
+| `box.Slot(stored)`                     | A slot from what you saved earlier. Makes no request.                                                                                                                    |
+| `box.Release(ctx, slotID)`             | Releases a slot you only know the id of. `box.ReleaseAt(ctx, boxURL, slotID)` for one on another box.                                                                    |
+| `box.List(ctx)`                        | Slots (this namespace's, if you set one), with their run ids.                                                                                                            |
+| `box.Nodes(ctx)`                       | Nodes and their load.                                                                                                                                                    |
+| `box.Reap(ctx, opts)`                  | Releases slots whose run `IsLive` says is gone; returns how many. Young slots (`Grace`, 3 min) are kept.                                                                 |
+| `slot.IsAlive(ctx)`                    | Never fails: asks twice, and a box that cannot be asked counts as "not alive".                                                                                           |
+| `slot.Release(ctx)`                    | Closes the browser. Idempotent.                                                                                                                                          |
+| `json.Marshal(slot)` / `slot.Stored()` | What to save to come back to the browser later. It holds the slot token: store it like a secret.                                                                         |
+
+`AcquireOptions` also takes `Proxy` (a `*ProxyOptions` with `Server`, `Username`, `Password` and `Bypass`), `Timezone`, `Locale` and `NodeLabels`. The proxy's credentials stay on the box's node, and a `ProxyOptions` prints with its password hidden. When the box cannot give what was asked for (no node can, or the box is older than the options and would have made a plain browser, which is released first), `Acquire` fails with `ErrUnsupported`.
 
 Zero values mean "the default". To ask for the opposite use `browserbay.NoWait` (do not wait for a free slot), `browserbay.NoGrace` (reap slots of any age) and `browserbay.NoRetryDelay`.
 

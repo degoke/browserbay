@@ -8,7 +8,7 @@ import threading
 import unittest
 from typing import Any
 
-from browserbay import AsyncBrowserBay, AsyncSlot, NoCapacityError
+from browserbay import AsyncBrowserBay, AsyncSlot, NoCapacityError, Proxy, UnsupportedError
 
 from fakebox import API_KEY, FakeBox
 
@@ -52,7 +52,7 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         box = AsyncBrowserBay(fake.url, API_KEY, retry_delay=0)
         gate = threading.Event()
 
-        def blocked_acquire(*args: Any) -> None:
+        def blocked_acquire(*args: Any, **kwargs: Any) -> None:
             gate.wait(10)
             raise NoCapacityError()
 
@@ -64,6 +64,26 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             gate.set()
             await asyncio.gather(*waiting, return_exceptions=True)
+
+    async def test_slot_options_cross_the_wrapper_and_an_old_box_is_refused(self) -> None:
+        fake = self.box(modern=True)
+        box = AsyncBrowserBay(fake.url, API_KEY, retry_delay=0)
+        async with await box.acquire(
+            "job-1",
+            600,
+            proxy=Proxy("http://proxy.example.com:8080", "u", "p"),
+            timezone="Europe/Paris",
+            locale="fr-FR",
+            node_labels=["home"],
+        ):
+            body = fake.calls[0].body
+            self.assertEqual(body["proxy"]["server"], "http://proxy.example.com:8080")  # type: ignore[index]
+            self.assertEqual((body["timezone"], body["locale"], body["nodeLabels"]), ("Europe/Paris", "fr-FR", ["home"]))  # type: ignore[index]
+
+        old = self.box()  # predates the options
+        with self.assertRaises(UnsupportedError):
+            await AsyncBrowserBay(old.url, API_KEY, retry_delay=0).acquire("job-2", 600, timezone="UTC")
+        self.assertEqual(old.slots, {}, "the plain browser it made was released")
 
     async def test_a_full_box_raises_no_capacity_error(self) -> None:
         box = AsyncBrowserBay(self.box(create_status=503).url, API_KEY)

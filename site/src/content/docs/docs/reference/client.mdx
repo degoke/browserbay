@@ -33,22 +33,29 @@ const box = createBrowserBay({
 
 ## box
 
-| Method                                                | Returns         | Does                                                                                  |
-| ----------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------- |
-| `box.acquire({ runId, maxLifetimeSeconds, waitMs? })` | `Slot`          | Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait. |
-| `box.slot(stored)`                                    | `Slot`          | A slot from what you saved earlier. Makes no request.                                 |
-| `box.release(slotId, { url? })`                       | `void`          | Releases a slot you only know the id of. Idempotent.                                  |
-| `box.list()`                                          | `SlotSummary[]` | Slots, only this namespace's if you set one. No tokens.                               |
-| `box.nodes()`                                         | `NodeSummary[]` | Nodes, their capacity and load.                                                       |
-| `box.reap({ isLive, graceMs?, skip? })`               | `number`        | Releases slots whose owner `isLive` says is gone. Returns how many.                   |
+| Method                                                                                                        | Returns         | Does                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `box.acquire({ runId, maxLifetimeSeconds, waitMs?, proxy?, timezone?, locale?, nodeLabels?, signRequests? })` | `Slot`          | Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait, and `UnsupportedError` when options were asked for and the box cannot give them. |
+| `box.slot(stored)`                                                                                            | `Slot`          | A slot from what you saved earlier. Makes no request.                                                                                                                  |
+| `box.release(slotId, { url? })`                                                                               | `void`          | Releases a slot you only know the id of. Idempotent.                                                                                                                   |
+| `box.list()`                                                                                                  | `SlotSummary[]` | Slots, only this namespace's if you set one. No tokens.                                                                                                                |
+| `box.nodes()`                                                                                                 | `NodeSummary[]` | Nodes, their capacity and load.                                                                                                                                        |
+| `box.reap({ isLive, graceMs?, skip? })`                                                                       | `number`        | Releases slots whose owner `isLive` says is gone. Returns how many.                                                                                                    |
 
 ### acquire options
 
-| Option               | Meaning                                                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `runId`              | Your id for what the browser is for. Up to 200 characters, including the namespace.                                             |
-| `maxLifetimeSeconds` | The lease. The browser closes itself after this long. 60 to 86400.                                                              |
-| `waitMs`             | How long to wait for a free slot. Default 30000. Whole milliseconds. `0` means do not wait. The box caps it at its own maximum. |
+| Option               | Meaning                                                                                                                                                                                                                                             |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runId`              | Your id for what the browser is for. Up to 200 characters, including the namespace.                                                                                                                                                                 |
+| `maxLifetimeSeconds` | The lease. The browser closes itself after this long. 60 to 86400.                                                                                                                                                                                  |
+| `waitMs`             | How long to wait for a free slot. Default 30000. Whole milliseconds. `0` means do not wait. The box caps it at its own maximum.                                                                                                                     |
+| `proxy`              | `{ server, username?, password?, bypass? }`. The slot's traffic goes through this proxy: see [Avoid bot blocks](/docs/guides/avoid-bot-blocks/#send-a-slots-traffic-through-a-proxy). The credentials stay on the box's node.                       |
+| `timezone`           | An IANA time zone such as `Europe/Berlin`. Needs a box whose nodes run `BROWSERBAY_ISOLATION=process`.                                                                                                                                              |
+| `locale`             | A language tag such as `de-DE`. Needs a box whose nodes run `BROWSERBAY_ISOLATION=process`.                                                                                                                                                         |
+| `nodeLabels`         | Only place the slot on a node that carries all of these labels (`BROWSERBAY_NODE_LABELS`).                                                                                                                                                          |
+| `signRequests`       | `true` signs every request of the slot's browser (Web Bot Auth), `false` asks for it to be left unsigned, and left out the node's own setting decides. See [Identify your box to sites](/docs/guides/avoid-bot-blocks/#identify-your-box-to-sites). |
+
+`acquire` throws `UnsupportedError` (a `BrowserBayError`, status 422 when the box said so) when no node can give what was asked for, **and when the box is older than the options**: such a box would answer with a plain browser, so the client checks that the box says it applied each option, releases the browser if it did not and throws. It never hands you a browser that quietly lacks its proxy.
 
 ## slot
 
@@ -66,7 +73,7 @@ const box = createBrowserBay({
 
 ```ts
 SlotSummary = { slotId, runId, nodeId, createdAt }
-NodeSummary = { nodeId, maxContexts, contexts, draining, lastSeenAt }
+NodeSummary = { nodeId, maxContexts, contexts, draining, lastSeenAt, features?, labels?, exclusive? }
 ```
 
 ## Errors

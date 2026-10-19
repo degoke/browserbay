@@ -1,3 +1,8 @@
 mode: allInOne
 allInOne:
   acceptRemoteNodes: true
+webBotAuth:
+  mode: always
+  agentUrl: https://browsers.example.com
+  # Only rendered, never used: make a real key with `browserbay web-bot-auth`.
+  key: 'not-a-real-key-the-chart-only-renders-it'

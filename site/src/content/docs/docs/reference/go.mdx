@@ -64,17 +64,27 @@ The [live view guide](/docs/guides/live-view/) shows what to send over such a co
 
 ## The client
 
-| Call                       | Does                                                                                              |
-| -------------------------- | ------------------------------------------------------------------------------------------------- |
-| `box.Acquire(ctx, opts)`   | Takes a browser. `ErrNoCapacity` when the box stays full for the whole `Wait` (default 30 s).     |
-| `box.Slot(stored)`         | A slot from what you saved earlier. Makes no request.                                             |
-| `box.Release(ctx, slotID)` | Releases a slot you only know the id of. `ReleaseAt(ctx, boxURL, slotID)` for one on another box. |
-| `box.List(ctx)`            | Slots (this namespace's, if you set one), with their run ids.                                     |
-| `box.Nodes(ctx)`           | Nodes and their load.                                                                             |
-| `box.Reap(ctx, opts)`      | Releases slots whose run `IsLive` says is gone. Returns how many.                                 |
-| `slot.IsAlive(ctx)`        | Never fails. A box that cannot be asked counts as "not alive".                                    |
-| `slot.Release(ctx)`        | Closes the browser. Idempotent.                                                                   |
-| `json.Marshal(slot)`       | What to save to come back later. It holds the slot token: store it like a secret.                 |
+| Call                       | Does                                                                                                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `box.Acquire(ctx, opts)`   | Takes a browser. `ErrNoCapacity` when the box stays full for the whole `Wait` (default 30 s), `ErrUnsupported` when options were asked for and the box cannot give them. |
+| `box.Slot(stored)`         | A slot from what you saved earlier. Makes no request.                                                                                                                    |
+| `box.Release(ctx, slotID)` | Releases a slot you only know the id of. `ReleaseAt(ctx, boxURL, slotID)` for one on another box.                                                                        |
+| `box.List(ctx)`            | Slots (this namespace's, if you set one), with their run ids.                                                                                                            |
+| `box.Nodes(ctx)`           | Nodes and their load.                                                                                                                                                    |
+| `box.Reap(ctx, opts)`      | Releases slots whose run `IsLive` says is gone. Returns how many.                                                                                                        |
+| `slot.IsAlive(ctx)`        | Never fails. A box that cannot be asked counts as "not alive".                                                                                                           |
+| `slot.Release(ctx)`        | Closes the browser. Idempotent.                                                                                                                                          |
+| `json.Marshal(slot)`       | What to save to come back later. It holds the slot token: store it like a secret.                                                                                        |
+
+`AcquireOptions` also takes `Proxy` (a `*ProxyOptions` with `Server`, `Username`, `Password` and `Bypass`), `Timezone`, `Locale`, `NodeLabels` and `SignRequests` (a `*bool`, so that `false` can be asked for and `nil` leaves it to the node). `ProxyOptions` prints with its password hidden. `Acquire` fails with `ErrUnsupported` when no node can give what was asked for, and when the box is older than the options (it would have made a plain browser, which is released before the error is returned).
+
+```go
+slot, err := box.Acquire(ctx, browserbay.AcquireOptions{
+    RunID: "task-42", MaxLifetime: 30 * time.Minute,
+    Proxy:      &browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "user", Password: "secret"},
+    NodeLabels: []string{"residential"},
+})
+```
 
 `Options` also takes `Namespace`, `AllowOtherBoxes` (a list of addresses a stored slot may name), `AllowAnyBox`, `HTTPClient`, `Logger`, `Now` and `RetryDelay`.
 

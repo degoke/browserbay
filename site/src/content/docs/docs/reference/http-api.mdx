@@ -7,15 +7,16 @@ The Node client is a thin wrapper over this API. Types are in [`src/protocol.ts`
 
 Two kinds of credential are used. The **API key** goes in `Authorization: Bearer <key>`. A **slot token** goes in `x-browserbay-token: <token>`.
 
-| Call                   | Auth       | Does                                                                                                                                                                                  |
-| ---------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /v1/slots`       | API key    | Takes a browser.                                                                                                                                                                      |
-| `GET /v1/slots`        | API key    | Lists slots. No tokens. A key confined to a namespace sees only its own.                                                                                                              |
-| `DELETE /v1/slots/:id` | API key    | Releases a browser. Idempotent, `204`. A key confined to a namespace cannot release another namespace's slot: that answers `204` and does nothing, as for a slot that does not exist. |
-| `GET /v1/nodes`        | API key    | Lists nodes, their capacity and load. `403` for a key confined to a namespace.                                                                                                        |
-| `GET /v1/slots/:id`    | slot token | `200` while the slot's browser is reachable, `404` when gone, `503` while its node reconnects.                                                                                        |
-| `WS /v1/cdp/:id`       | slot token | The slot's DevTools endpoint.                                                                                                                                                         |
-| `GET /health`          | none       | `200` when the relay is up. It does not say a node has joined.                                                                                                                        |
+| Call                                                 | Auth       | Does                                                                                                                                                                                  |
+| ---------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /v1/slots`                                     | API key    | Takes a browser.                                                                                                                                                                      |
+| `GET /v1/slots`                                      | API key    | Lists slots. No tokens. A key confined to a namespace sees only its own.                                                                                                              |
+| `DELETE /v1/slots/:id`                               | API key    | Releases a browser. Idempotent, `204`. A key confined to a namespace cannot release another namespace's slot: that answers `204` and does nothing, as for a slot that does not exist. |
+| `GET /v1/nodes`                                      | API key    | Lists nodes, their capacity and load. `403` for a key confined to a namespace.                                                                                                        |
+| `GET /v1/slots/:id`                                  | slot token | `200` while the slot's browser is reachable, `404` when gone, `503` while its node reconnects.                                                                                        |
+| `WS /v1/cdp/:id`                                     | slot token | The slot's DevTools endpoint.                                                                                                                                                         |
+| `GET /health`                                        | none       | `200` when the relay is up. It does not say a node has joined.                                                                                                                        |
+| `GET /.well-known/http-message-signatures-directory` | none       | The public key the box signs with, as a JWKS, when the relay has `BROWSERBAY_WEB_BOT_AUTH_KEY`. Signed over the host that asked.                                                      |
 
 ## Take a browser
 
@@ -26,15 +27,41 @@ curl -X POST https://browsers.example.com/v1/slots \
   -d '{ "runId": "task-42", "maxLifetimeSeconds": 1800, "waitMs": 5000 }'
 ```
 
-| Status | Body                              | Meaning                                                                                                     |
-| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `201`  | `{ "slotId", "token", "nodeId" }` | You have a browser. The token is shown once.                                                                |
-| `503`  | `no_capacity`                     | Every node is full, or none is connected.                                                                   |
-| `403`  | `forbidden`                       | The key is confined to a namespace and the run id is outside it.                                            |
-| `429`  | `quota_exceeded`                  | The key's namespace already holds as many browsers as its quota allows. Answered at once: it does not wait. |
-| `400`  |                                   | A bad body: `runId` is 1 to 200 characters, `maxLifetimeSeconds` is 60 to 86400.                            |
+| Status | Body                                         | Meaning                                                                                                                                                                                                                                                                                            |
+| ------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`  | `{ "slotId", "token", "nodeId", "applied" }` | You have a browser. The token is shown once. `applied` names the options of the request that the slot has.                                                                                                                                                                                         |
+| `503`  | `no_capacity`                                | Every node is full, or none is connected.                                                                                                                                                                                                                                                          |
+| `422`  | `unsupported`, with a `message`              | Nodes are connected, and none could serve this request. Either none has a feature or a label it asks for, or every node that does refused the slot's value (a time zone its system lacks, an option it does not know): the `message` says which. Answered at once, because waiting would not help. |
+| `403`  | `forbidden`                                  | The key is confined to a namespace and the run id is outside it.                                                                                                                                                                                                                                   |
+| `429`  | `quota_exceeded`                             | The key's namespace already holds as many browsers as its quota allows. Answered at once: it does not wait.                                                                                                                                                                                        |
+| `400`  | `invalid_request`, usually with a `message`  | A bad body: `runId` is 1 to 200 characters, `maxLifetimeSeconds` is 60 to 86400, a field the box does not know, or an option that is wrong. The message says which.                                                                                                                                |
 
 `waitMs` defaults to 0 here, while the client's default is 30 seconds. The box caps it at its `BROWSERBAY_MAX_ACQUIRE_WAIT_MS`.
+
+### Options for the browser
+
+All are optional. A request without them is the one a box has always taken.
+
+| Field          | Meaning                                                                                                                                                                                                                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `proxy`        | `{ "server", "username"?, "password"?, "bypass"? }`. The slot's traffic goes through this proxy. `server` is `http://`, `https://` or `socks5://` with `host:port` and nothing else. A loopback, unspecified or link-local address is refused (`400`).                                           |
+| `timezone`     | An IANA time zone such as `Europe/Berlin`. Needs a node running `BROWSERBAY_ISOLATION=process`.                                                                                                                                                                                                  |
+| `locale`       | A language tag such as `de-DE`: the browser's `navigator.language` and `Accept-Language`. Needs a node running `BROWSERBAY_ISOLATION=process`.                                                                                                                                                   |
+| `nodeLabels`   | A list of labels. The slot is only placed on a node that carries all of them (`BROWSERBAY_NODE_LABELS`).                                                                                                                                                                                         |
+| `signRequests` | `true` signs every request of the slot's browser (Web Bot Auth); `false` asks for it to be left unsigned; left out, the node's own setting decides. `true` needs a node set to `optional` or `always` that signs with the key this relay publishes, and `false` one that is not set to `always`. |
+
+```sh
+curl -X POST https://browsers.example.com/v1/slots \
+  -H "Authorization: Bearer $BROWSERBAY_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "runId": "task-42", "maxLifetimeSeconds": 1800,
+        "proxy": { "server": "http://proxy.example.com:8080", "username": "user", "password": "secret" },
+        "nodeLabels": ["residential"] }'
+```
+
+**Check `applied`.** A box older than these options answers `201` and ignores a field it does not know, and the browser it made is a plain one: for a proxy, a browser that goes out from the box's own address. From this version the box refuses a field it does not know (`400`), and the clients check that `applied` has what they asked for, release the browser and fail with `UnsupportedError` if it does not. If you call the API yourself, do the same.
+
+The password is passed to the one node that makes the browser and is kept nowhere: it is not in the relay's tables, in `GET /v1/slots`, in `GET /v1/nodes` or in a log.
 
 ## Connect to the browser
 

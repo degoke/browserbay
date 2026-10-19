@@ -15,12 +15,14 @@ import {
   RELAY_PATHS,
   SLOT_LIMITS,
   TOKEN_HEADER,
+  type CreateSlotRequest,
   type CreateSlotResponse,
   type NodeSummary,
+  type ProxySettings,
   type SlotSummary
 } from '../protocol.js'
 
-export type { NodeSummary, SlotSummary }
+export type { NodeSummary, ProxySettings, SlotSummary }
 
 export interface BrowserBayOptions {
   /** The box's base URL, e.g. https://browsers.example.com. A path prefix is kept. */
@@ -56,6 +58,24 @@ export interface AcquireOptions {
   maxLifetimeSeconds: number
   /** How long to wait for a free slot before giving up with a `NoCapacityError`, in whole milliseconds (0 means do not wait). The box caps it at its own maximum. Default 30000. */
   waitMs?: number
+  /**
+   * Send the slot's traffic through this proxy (`http://`, `https://` or `socks5://`, with `host:port`). The credentials stay
+   * on the box's node, which reaches the proxy for the browser: the browser never holds them and a page cannot read them.
+   * Throws `UnsupportedError` if no node of the box can do this.
+   */
+  proxy?: ProxySettings
+  /** The IANA time zone the slot's browser runs in, such as `Europe/Berlin`. Only a box whose nodes run `BROWSERBAY_ISOLATION=process` can. */
+  timezone?: string
+  /** The slot's browser language, such as `de-DE`: its `navigator.language` and `Accept-Language`. Only a box whose nodes run `BROWSERBAY_ISOLATION=process` can. */
+  locale?: string
+  /** Only place the slot on a node that carries every one of these labels (`BROWSERBAY_NODE_LABELS` on the node). */
+  nodeLabels?: string[]
+  /**
+   * Sign every request of the slot's browser (Web Bot Auth), so sites that know the box can tell whose browser it is. `true` needs a
+   * node that signs and `false` one that can leave a slot unsigned; left out, the node's own setting
+   * (`BROWSERBAY_WEB_BOT_AUTH`) decides. Throws `UnsupportedError` when no node can.
+   */
+  signRequests?: boolean
 }
 
 /** The part of a slot worth keeping to come back to it later (`box.slot(stored)`). It contains the slot token: store it like a secret. */
@@ -99,6 +119,9 @@ export interface BrowserBay {
   /**
    * Takes a browser. Throws `NoCapacityError` when the box stays full for the whole wait, `QuotaExceededError` when the key's
    * quota is used up, and `ForbiddenError` when the key may not use this run id (it is confined to another namespace).
+   * Throws `UnsupportedError` when options were asked for and the box cannot give them: no node can do it, or the box is
+   * older than the options and would have made a plain browser. A browser the box made without what was asked for is
+   * released before the error is thrown.
    */
   acquire(options: AcquireOptions): Promise<Slot>
   /** A slot you stored earlier. Makes no request; use `isAlive()` to find out whether it still exists. */
@@ -155,6 +178,18 @@ export class QuotaExceededError extends BrowserBayError {
   constructor() {
     super("This API key's quota of browsers is used up", 429)
     this.name = 'QuotaExceededError'
+  }
+}
+
+/**
+ * The box cannot give what `acquire` asked for (a proxy, a time zone, a language, a node label): no node it has can, or the
+ * box is older than the option and would have answered with a plain browser, which here is a browser that goes out from the
+ * box's own address. Nothing is left running: a browser made without it is released first.
+ */
+export class UnsupportedError extends BrowserBayError {
+  constructor(message: string, status?: number) {
+    super(message, status)
+    this.name = 'UnsupportedError'
   }
 }
 
@@ -301,7 +336,7 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
   }
 
   return {
-    async acquire({ runId, maxLifetimeSeconds, waitMs = 30_000 }) {
+    async acquire({ runId, maxLifetimeSeconds, waitMs = 30_000, proxy, timezone, locale, nodeLabels, signRequests }) {
       const fullRunId = namespacePrefix ? `${namespacePrefix}${runId}` : runId
       if (typeof runId !== 'string' || !runId || fullRunId.length > SLOT_LIMITS.maxRunIdLength) {
         throw new TypeError(
@@ -320,11 +355,36 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
       if (!Number.isInteger(waitMs) || waitMs < 0) {
         throw new TypeError('waitMs must be a whole number of milliseconds, 0 or more')
       }
-      const body = {
-        runId: fullRunId,
-        maxLifetimeSeconds,
-        waitMs
+      if (proxy !== undefined && (typeof proxy !== 'object' || proxy === null || typeof proxy.server !== 'string')) {
+        throw new TypeError(
+          'proxy must be an object with a server, such as { server: "http://proxy.example.com:8080" }'
+        )
       }
+      for (const [name, value] of [
+        ['timezone', timezone],
+        ['locale', locale]
+      ] as const) {
+        if (value !== undefined && typeof value !== 'string') throw new TypeError(`${name} must be a string`)
+      }
+      if (
+        nodeLabels !== undefined &&
+        (!Array.isArray(nodeLabels) || nodeLabels.some((label) => typeof label !== 'string'))
+      ) {
+        throw new TypeError('nodeLabels must be a list of strings')
+      }
+      if (signRequests !== undefined && typeof signRequests !== 'boolean')
+        throw new TypeError('signRequests must be true or false')
+      // Only what was asked for is sent, so a request without options is the one a box has always taken.
+      const options: Partial<CreateSlotRequest> = {
+        ...(proxy !== undefined ? { proxy } : {}),
+        ...(timezone !== undefined ? { timezone } : {}),
+        ...(locale !== undefined ? { locale } : {}),
+        ...(nodeLabels !== undefined && nodeLabels.length > 0 ? { nodeLabels } : {}),
+        ...(signRequests !== undefined ? { signRequests } : {})
+      }
+      const body: CreateSlotRequest = { runId: fullRunId, maxLifetimeSeconds, waitMs, ...options }
+      // What was asked for is exactly the options: the plain fields are not among them, whatever is added to either part.
+      const asked = Object.keys(options)
       const response = await api(
         boxUrl,
         RELAY_PATHS.slots,
@@ -335,11 +395,31 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
       if (response.status === 503) throw new NoCapacityError()
       if (response.status === 403) throw new ForbiddenError()
       if (response.status === 429) throw new QuotaExceededError()
+      if (response.status === 422 || response.status === 400) {
+        // The box says what is wrong with what was asked for. It never repeats a credential, so the text is safe to show.
+        const said = ((await response.json().catch(() => ({}))) as { message?: unknown } | null)?.message
+        const detail = typeof said === 'string' && said ? `: ${said}` : ''
+        if (response.status === 422) throw new UnsupportedError(`The box cannot give this browser${detail}`, 422)
+        throw new BrowserBayError(`The browser service refused the request (400)${detail}`, 400)
+      }
       if (!response.ok)
         throw new BrowserBayError(`The browser service could not start a browser (${response.status})`, response.status)
       const slot: Partial<CreateSlotResponse> = (await response.json().catch(() => ({}))) ?? {}
       if (!slot.slotId || !slot.token || !slot.nodeId) {
         throw new BrowserBayError('The browser service returned an incomplete slot', response.status)
+      }
+      // A box older than these options answers 201 and ignores what it does not know: the browser it made is a plain one.
+      const missing = asked.filter((name) => !(Array.isArray(slot.applied) && slot.applied.includes(name)))
+      if (missing.length > 0) {
+        await deleteSlot(boxUrl, slot.slotId).catch((error) =>
+          logger.warn?.('Could not release a browser made without the options asked for', {
+            slotId: slot.slotId,
+            error: errorMessage(error, 'unknown')
+          })
+        )
+        throw new UnsupportedError(
+          `The box did not apply ${missing.join(', ')}: it is older than these options. Upgrade the box (its relay and nodes)`
+        )
       }
       return makeSlot({ url: boxUrl, slotId: slot.slotId, token: slot.token, nodeId: slot.nodeId })
     },

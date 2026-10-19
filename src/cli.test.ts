@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseNodeEnv } from './node/main.js'
-import { parseApiKeys, parseEnrollmentSecrets } from './relay/config.js'
+import { parseApiKeys, parseEnrollmentSecrets, parseRelayConfig } from './relay/config.js'
+import { parseSigningKey } from './web-bot-auth.js'
 
 // The built CLI, as `bin` runs it: `pnpm test` builds first.
 const CLI = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
@@ -100,4 +101,35 @@ test('cli: a bad setting is a sentence and a non-zero exit, never a stack trace'
   const node = cli(['node'])
   assert.equal(node.status, 2)
   assert.match(node.stderr, /BROWSERBAY_RELAY_URL and BROWSERBAY_ENROLLMENT_SECRET/)
+})
+
+test('cli: `web-bot-auth` prints a private key a node accepts, whose public half the relay publishes, and names it by its thumbprint', () => {
+  const out = cli(['web-bot-auth']).stdout
+  const key = /BROWSERBAY_WEB_BOT_AUTH_KEY='(\{.*\})'/.exec(out)?.[1]
+  const keyid = /looks the key up by:\s+(\S+)/.exec(out)?.[1]
+  assert.ok(key && keyid, out)
+  assert.equal(parseSigningKey(key).keyid, keyid, 'the id it prints is the one the key has')
+  assert.equal(
+    parseNodeEnv({
+      BROWSERBAY_RELAY_URL: 'https://r.example.com',
+      BROWSERBAY_ENROLLMENT_SECRET: 'x'.repeat(16),
+      BROWSERBAY_WEB_BOT_AUTH: 'optional',
+      BROWSERBAY_WEB_BOT_AUTH_KEY: key,
+      BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com'
+    }).webBotAuth?.mode,
+    'optional',
+    'a node takes it as printed'
+  )
+  assert.equal(
+    parseRelayConfig({
+      BROWSERBAY_API_KEY: 'k'.repeat(16),
+      BROWSERBAY_ENROLLMENT_SECRETS: 'n:' + '0'.repeat(64),
+      BROWSERBAY_WEB_BOT_AUTH_KEY: key
+    }).webBotAuthKey,
+    key,
+    'and so does the relay'
+  )
+  assert.match(out, /\/\.well-known\/http-message-signatures-directory/)
+  assert.notEqual(cli(['web-bot-auth']).stdout, out, 'a different key each time')
+  assert.ok(cli(['help']).stdout.includes('web-bot-auth'), 'and the help lists it')
 })

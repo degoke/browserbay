@@ -40,27 +40,30 @@ or `--set node.autoscaling.enabled=true` (CPU based, with a slow scale-down). A 
 
 ## Values
 
-| Key                                                  | Default                                  | Meaning                                                                                         |
-| ---------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `mode`                                               | `split`                                  | `split` or `allInOne`.                                                                          |
-| `image.repository` / `tag`                           | `ghcr.io/degoke/browserbay` / appVersion | The box image: the nodes, and the all-in-one pod.                                               |
-| `relayImage.repository` / `tag`                      | `ghcr.io/degoke/browserbay-relay`        | The relay image (no Chromium).                                                                  |
-| `auth.existingSecret`                                | none                                     | A Secret you manage, with `apiKey`, `enrollmentSecret` and `enrollmentSecrets`.                 |
-| `auth.apiKey`, `auth.enrollmentSecret`               | generated                                | Choose your own (16+ characters). Otherwise made once and kept across upgrades.                 |
-| `relay.ingress.*`                                    | off                                      | Serve the relay over HTTPS, with WebSocket support and long timeouts.                           |
-| `relay.maxAcquireWaitMs`                             | `60000`                                  | The longest a client may wait for a free slot.                                                  |
-| `node.relayUrl`                                      | none                                     | **Required in split mode.** The relay's `https://` address.                                     |
-| `node.allowInsecureRelay`                            | `false`                                  | Let nodes reach the relay's in-cluster Service over plain http, on a network you trust.         |
-| `node.replicas`                                      | `2`                                      | Nodes, unless autoscaling is on.                                                                |
-| `node.maxContexts`                                   | `5`                                      | Browsers per node.                                                                              |
-| `node.drainSeconds`                                  | `120`                                    | How long a stopping node waits for its browsers.                                                |
-| `node.resources`                                     | 1 CPU / 2 Gi, limit 4 Gi                 | Per node pod. Chromium needs several hundred MB per browser.                                    |
-| `node.autoscaling.*`                                 | off                                      | A HorizontalPodAutoscaler on the node Deployment.                                               |
-| `node.podDisruptionBudget.*`                         | on, `maxUnavailable: 1`                  | Keeps most nodes through a cluster drain.                                                       |
-| `node.networkPolicy.dnsPeers`                        | kube-dns pods                            | Where the node pods may send DNS. Change it for NodeLocal DNSCache or differently labelled DNS. |
-| `node.networkPolicy.*`                               | off                                      | Keeps browsers off private ranges and the metadata address.                                     |
-| `node.extraEnv`, `extraVolumes`, `extraVolumeMounts` | none                                     | For example a private CA bundle.                                                                |
-| `allInOne.acceptRemoteNodes`                         | `false`                                  | Let nodes elsewhere join the all-in-one box.                                                    |
+| Key                                                  | Default                                  | Meaning                                                                                                                 |
+| ---------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `mode`                                               | `split`                                  | `split` or `allInOne`.                                                                                                  |
+| `image.repository` / `tag`                           | `ghcr.io/degoke/browserbay` / appVersion | The box image: the nodes, and the all-in-one pod.                                                                       |
+| `relayImage.repository` / `tag`                      | `ghcr.io/degoke/browserbay-relay`        | The relay image (no Chromium).                                                                                          |
+| `auth.existingSecret`                                | none                                     | A Secret you manage, with `apiKey`, `enrollmentSecret` and `enrollmentSecrets`.                                         |
+| `auth.apiKey`, `auth.enrollmentSecret`               | generated                                | Choose your own (16+ characters). Otherwise made once and kept across upgrades.                                         |
+| `relay.ingress.*`                                    | off                                      | Serve the relay over HTTPS, with WebSocket support and long timeouts.                                                   |
+| `relay.maxAcquireWaitMs`                             | `60000`                                  | The longest a client may wait for a free slot.                                                                          |
+| `node.relayUrl`                                      | none                                     | **Required in split mode.** The relay's `https://` address.                                                             |
+| `node.allowInsecureRelay`                            | `false`                                  | Let nodes reach the relay's in-cluster Service over plain http, on a network you trust.                                 |
+| `node.replicas`                                      | `2`                                      | Nodes, unless autoscaling is on.                                                                                        |
+| `node.maxContexts`                                   | `5`                                      | Browsers per node.                                                                                                      |
+| `node.headless`                                      | `xvfb`                                   | `xvfb`: headful on a virtual display (no `HeadlessChrome`). `true`: headless. About 150 MB less.                        |
+| `node.labels`, `node.exclusive`                      | none, `false`                            | Names for the nodes (`residential`) that a client can ask for; `exclusive` keeps them for those slots.                  |
+| `webBotAuth.*`                                       | `mode: off`                              | Sign the browsers' requests (Web Bot Auth): `mode`, `agentUrl`, `existingSecret` or `key`. The relay publishes the key. |
+| `node.drainSeconds`                                  | `120`                                    | How long a stopping node waits for its browsers.                                                                        |
+| `node.resources`                                     | 1 CPU / 2 Gi, limit 4 Gi                 | Per node pod. Chromium needs several hundred MB per browser.                                                            |
+| `node.autoscaling.*`                                 | off                                      | A HorizontalPodAutoscaler on the node Deployment.                                                                       |
+| `node.podDisruptionBudget.*`                         | on, `maxUnavailable: 1`                  | Keeps most nodes through a cluster drain.                                                                               |
+| `node.networkPolicy.dnsPeers`                        | kube-dns pods                            | Where the node pods may send DNS. Change it for NodeLocal DNSCache or differently labelled DNS.                         |
+| `node.networkPolicy.*`                               | off                                      | Keeps browsers off private ranges and the metadata address.                                                             |
+| `node.extraEnv`, `extraVolumes`, `extraVolumeMounts` | none                                     | For example a private CA bundle.                                                                                        |
+| `allInOne.acceptRemoteNodes`                         | `false`                                  | Let nodes elsewhere join the all-in-one box.                                                                            |
 
 ## Things to know
 

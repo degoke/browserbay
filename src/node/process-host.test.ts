@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
+import { generateSigningKey, createRequestSigner } from '../web-bot-auth.js'
 import { createFakeChromium } from './fake-chromium.js'
 import { createProcessHost, removeStaleProfiles, type ProcessHostOptions } from './process-host.js'
 
@@ -62,6 +63,37 @@ function fakeLauncher({ silent = false, dieOnStart = false } = {}) {
 
 const host = (launcher: ReturnType<typeof fakeLauncher>, options: Partial<ProcessHostOptions> = {}) =>
   createProcessHost({ executable: '/chromium', spawnChromium: launcher.spawnChromium, stopGraceMs: 50, ...options })
+
+/** An "Xvfb" for the host to start: it reports a display number on fd 3, as the real one does, and can be made to die. */
+function fakeXvfb({ failToStart = false } = {}) {
+  const started: Array<{ args: string[]; display: string; signals: string[]; die(signal?: NodeJS.Signals): void }> = []
+  let next = 10
+  const spawnXvfb = ((_exe: string, args: string[]) => {
+    const child: any = new EventEmitter()
+    const report = new PassThrough()
+    child.stdio = [null, null, new PassThrough(), report]
+    child.stderr = child.stdio[2]
+    child.exitCode = null
+    child.signalCode = null
+    const signals: string[] = []
+    const die = (signal: NodeJS.Signals | null = 'SIGKILL') => {
+      if (child.signalCode || child.exitCode !== null) return
+      child.signalCode = signal
+      child.emit('exit', null, signal)
+    }
+    child.kill = (signal: string) => {
+      signals.push(signal)
+      queueMicrotask(() => die(signal as NodeJS.Signals))
+      return true
+    }
+    const number = next++
+    started.push({ args, display: `:${number}`, signals, die })
+    if (failToStart) setImmediate(() => die('SIGABRT'))
+    else queueMicrotask(() => report.write(`${number}\n`))
+    return child
+  }) as unknown as NonNullable<ProcessHostOptions['xvfb']>['spawnXvfb']
+  return { options: { executable: 'Xvfb', spawnXvfb }, started }
+}
 const until = async (condition: () => boolean, what: string) => {
   for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10))
   assert.ok(condition(), `timed out waiting for ${what}`)
@@ -69,7 +101,7 @@ const until = async (condition: () => boolean, what: string) => {
 
 test('process host: every slot gets its own browser and profile, started with the node’s fenced environment', async () => {
   const launcher = fakeLauncher()
-  const processes = host(launcher, { headless: true })
+  const processes = host(launcher, { display: 'headless' })
   process.env.BROWSERBAY_API_KEY_FOR_TEST = 'secret'
   try {
     await processes.createRun('s1')
@@ -248,4 +280,284 @@ test('process host: profiles a killed node left under its root are removed, and 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('process host: on xvfb every slot gets a display of its own, and a browser that sees only that one', async () => {
+  const saved = { DISPLAY: process.env.DISPLAY, WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY }
+  process.env.DISPLAY = ':0'
+  process.env.WAYLAND_DISPLAY = 'wayland-0'
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    assert.equal(displays.started.length, 2, 'a display each: clipboards and crashes are not shared')
+    const [one, two] = launcher.started
+    assert.equal(one!.env.DISPLAY, displays.started[0]!.display)
+    assert.equal(two!.env.DISPLAY, displays.started[1]!.display)
+    assert.notEqual(one!.env.DISPLAY, two!.env.DISPLAY)
+    assert.match(String(one!.env.XAUTHORITY), /Xauthority$/, 'the browser is given the cookie file')
+    assert.notEqual(one!.env.XAUTHORITY, two!.env.XAUTHORITY)
+    assert.ok(!('WAYLAND_DISPLAY' in one!.env), 'never the host compositor')
+    assert.ok(one!.args.includes('--ozone-platform=x11'))
+    assert.ok(!one!.args.some((arg) => arg.startsWith('--headless')))
+  } finally {
+    await processes.close()
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+})
+
+test('process host: releasing a slot ends its display and no other slot’s', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    await processes.disposeRun('s1')
+    const [first, second] = displays.started
+    assert.deepEqual(first!.signals, ['SIGTERM'], 'its display is stopped with its browser')
+    assert.deepEqual(second!.signals, [], 'the other slot’s display is left alone')
+  } finally {
+    await processes.close()
+  }
+  assert.deepEqual(displays.started[1]!.signals, ['SIGTERM'], 'closing the host stops the rest')
+})
+
+test('process host: a display that dies takes only its slot’s browser with it, and the node is told', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  const ended: Array<[string, string]> = []
+  processes.onRunEnded((runKey, reason) => ended.push([runKey, reason]))
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    displays.started[0]!.die('SIGSEGV')
+    await until(() => ended.length === 1, 'the slot to be reported ended')
+    assert.equal(ended[0]![0], 's1')
+    assert.match(ended[0]![1], /its browser ended \(Xvfb exited \(SIGSEGV\)\)/)
+    assert.deepEqual(launcher.started[0]!.signals, ['SIGKILL'], 'a browser cannot outlive its display')
+    assert.deepEqual(launcher.started[1]!.signals, [], 'the other slot carries on')
+    assert.equal(processes.size(), 1)
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a display that cannot start fails the create without starting a browser or leaving a profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browserbay-root-'))
+  const launcher = fakeLauncher()
+  const processes = host(launcher, {
+    display: 'xvfb',
+    xvfb: fakeXvfb({ failToStart: true }).options,
+    profileRoot: root
+  })
+  try {
+    await assert.rejects(processes.createRun('s1'), /Xvfb exited \(SIGABRT\) before it was ready/)
+    assert.equal(launcher.started.length, 0, 'no browser without a display')
+    assert.ok(!existsSync(join(root, 's1')), 'the profile made for it is removed')
+    assert.equal(processes.size(), 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('process host: headless slots start no display and their browser keeps the node’s own', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'headless', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    assert.equal(displays.started.length, 0)
+    assert.ok(launcher.started[0]!.args.includes('--headless=new'))
+    assert.ok(launcher.started[0]!.args.includes('--screen-info={1920x1080}'))
+  } finally {
+    await processes.close()
+  }
+})
+
+// ---- what a slot asked for: its proxy, time zone and language ----------------------------------------------------------
+
+/** A forwarder for the host to start: it records what it was given and whether it was closed. */
+function fakeForwarders({ failToStart = false } = {}) {
+  const started: Array<{ settings: any; url: string; closed: number }> = []
+  const start = (async (settings: unknown) => {
+    if (failToStart) throw new Error('could not listen')
+    const entry = { settings, url: `socks5://127.9.9.${started.length + 1}:4000`, closed: 0 }
+    started.push(entry)
+    return { url: entry.url, close: async () => void entry.closed++ }
+  }) as unknown as NonNullable<ProcessHostOptions['forwarder']>['start']
+  return { options: { start }, started }
+}
+
+const PROXY = {
+  server: 'http://proxy.example.com:8080',
+  username: 'user',
+  password: 'process-host-secret',
+  bypass: 'a.test'
+}
+
+test('process host: a proxied slot’s browser is made with its forwarder, kept off WebRTC’s own paths, and told no credentials', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  try {
+    await processes.createRun('s1', { proxy: PROXY })
+    await processes.createRun('s2')
+    assert.equal(forwarders.started.length, 1, 'only the proxied slot has one')
+    assert.deepEqual(forwarders.started[0]!.settings, PROXY)
+    const [proxied, plain] = launcher.started
+    assert.deepEqual(proxied!.fake.commands('Target.createBrowserContext').at(-1)!.params, {
+      disposeOnDetach: false,
+      proxyServer: forwarders.started[0]!.url,
+      proxyBypassList: '<-loopback>;a.test'
+    })
+    assert.ok(proxied!.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'))
+    assert.ok(!plain!.args.some((arg) => arg.includes('webrtc')), 'a plain slot keeps WebRTC as it is')
+    assert.ok(
+      !JSON.stringify([proxied!.args, proxied!.env, proxied!.fake.log]).includes('process-host-secret'),
+      'the browser never sees the password'
+    )
+    assert.ok(!JSON.stringify(proxied!.args).includes('proxy.example.com'), 'nor the real proxy')
+
+    await processes.disposeRun('s1')
+    assert.equal(forwarders.started[0]!.closed, 1, 'the forwarder is closed with the slot')
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a slot’s own browser is started in its time zone and language', async () => {
+  const launcher = fakeLauncher()
+  const processes = host(launcher)
+  try {
+    await processes.createRun('s1', { timezone: 'Europe/Berlin', locale: 'de-DE' })
+    await processes.createRun('s2', { locale: 'fr' })
+    await processes.createRun('s3')
+    const [german, french, plain] = launcher.started
+    assert.equal(german!.env.TZ, 'Europe/Berlin')
+    assert.deepEqual(
+      [german!.env.LANG, german!.env.LC_ALL, german!.env.LANGUAGE],
+      ['de_DE.UTF-8', 'de_DE.UTF-8', 'de_DE:de'],
+      'Linux Chromium reads the language from the environment'
+    )
+    assert.ok(german!.args.includes('--lang=de-DE') && german!.args.includes('--accept-lang=de-DE,de'))
+    assert.deepEqual([french!.env.LANGUAGE, french!.args.includes('--accept-lang=fr')], ['fr', true])
+    assert.equal(french!.env.TZ, undefined, 'only what was asked for is set')
+    assert.ok(!('TZ' in plain!.env) && !plain!.args.some((arg) => arg.startsWith('--lang')))
+    assert.ok(
+      plain!.args.at(-1) === 'about:blank' && german!.args.at(-1) === 'about:blank',
+      'the start page stays last'
+    )
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: options the node cannot honour fail the create before anything is made', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  try {
+    await assert.rejects(processes.createRun('s1', { surprise: 1 } as never), /does not know the option/)
+    await assert.rejects(processes.createRun('s2', { timezone: 'Mars/Olympus' }), /timezone/)
+    await assert.rejects(processes.createRun('s3', { proxy: { server: 'http://127.0.0.1:1' } }), /loopback/)
+    assert.equal(launcher.started.length, 0)
+    assert.equal(forwarders.started.length, 0)
+    assert.equal(processes.size(), 0)
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a forwarder is never left behind when its slot cannot be made', async () => {
+  // The forwarder cannot start: no browser, no profile.
+  const root = await mkdtemp(join(tmpdir(), 'browserbay-root-'))
+  const launcher = fakeLauncher()
+  const broken = host(launcher, { profileRoot: root, forwarder: fakeForwarders({ failToStart: true }).options })
+  await assert.rejects(broken.createRun('s1', { proxy: PROXY }), /could not listen/)
+  assert.equal(launcher.started.length, 0)
+  assert.ok(!existsSync(join(root, 's1')))
+
+  // The browser cannot be spawned: the forwarder that was started is closed, and so is the profile.
+  const forwarders = fakeForwarders()
+  const failing = createProcessHost({
+    executable: '/chromium',
+    profileRoot: root,
+    forwarder: forwarders.options,
+    spawnChromium: (() => {
+      throw new Error('spawn EACCES')
+    }) as unknown as NonNullable<ProcessHostOptions['spawnChromium']>
+  })
+  await assert.rejects(failing.createRun('s2', { proxy: PROXY }), /spawn EACCES/)
+  assert.equal(forwarders.started[0]!.closed, 1)
+  assert.ok(!existsSync(join(root, 's2')))
+
+  // The browser starts and never answers: ended, and the forwarder with it.
+  const silentForwarders = fakeForwarders()
+  const silent = host(fakeLauncher({ silent: true }), { startTimeoutMs: 100, forwarder: silentForwarders.options })
+  await assert.rejects(silent.createRun('s3', { proxy: PROXY }), /did not answer/)
+  assert.equal(silentForwarders.started[0]!.closed, 1)
+  await rm(root, { recursive: true, force: true })
+})
+
+test('process host: a proxied slot whose browser dies on its own loses its forwarder too', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  const ended: string[] = []
+  processes.onRunEnded((runKey) => ended.push(runKey))
+  try {
+    await processes.createRun('s1', { proxy: PROXY })
+    launcher.started[0]!.die('SIGSEGV')
+    await until(() => ended.length === 1, 'the slot to be reported ended')
+    await until(() => forwarders.started[0]!.closed === 1, 'its forwarder to be closed')
+  } finally {
+    await processes.close()
+  }
+})
+
+// ---- signing ----------------------------------------------------------------------------------------------------------
+
+test('process host: a slot is signed when it asks or the node always signs, and the context is made with the signer', async () => {
+  const key = generateSigningKey()
+  const signing = (mode: 'optional' | 'always') => ({
+    mode,
+    signer: createRequestSigner({ key: key.privateJwk, agent: 'https://box.example.com' })
+  })
+
+  const launcher = fakeLauncher()
+  const optional = host(launcher, { signing: signing('optional') })
+  try {
+    await optional.createRun('plain')
+    await optional.createRun('signed', { signRequests: true })
+    // What signs is the hub: for a run made with a signer it attaches a session of its own to every tab and turns request
+    // interception on there (scope.test.ts has the detail). So, seen from the browser: open a tab in the slot's context, and ask
+    // whether the hub intercepted it.
+    const interceptsATab = async (browser: (typeof launcher.started)[number]) => {
+      const context = [...browser.fake.contexts.keys()].at(-1)!
+      browser.fake.createTarget({ url: 'about:blank', browserContextId: context })
+      await browser.fake.flush()
+      return browser.fake.commands('Fetch.enable').length > 0
+    }
+    assert.equal(await interceptsATab(launcher.started[0]!), false, 'a slot that did not ask is not intercepted')
+    assert.equal(await interceptsATab(launcher.started[1]!), true, 'one that asked is')
+  } finally {
+    await optional.close()
+  }
+
+  const always = host(fakeLauncher(), { signing: signing('always') })
+  await assert.rejects(always.createRun('s', { signRequests: false }), /cannot leave one unsigned/)
+  await always.close()
+
+  const off = fakeLauncher()
+  const none = host(off)
+  await assert.rejects(none.createRun('s', { signRequests: true }), /does not sign requests/)
+  assert.equal(off.started.length, 0, 'nothing was started for a slot that could not be made as asked')
+  await none.close()
 })

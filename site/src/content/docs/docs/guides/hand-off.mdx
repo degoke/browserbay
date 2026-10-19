@@ -41,6 +41,8 @@ const box = createBrowserBay({
 
 Only those boxes are trusted too. Addresses are compared however they are spelled, so `https://Old-Box.example.com:443/` is the same box. `allowOtherBoxes: true` trusts any address, which is only for storage nobody else can write.
 
+A saved slot also keeps its cookies and storage. To carry a session from one slot to another, and what a site ties it to, see [Keep a session between runs](/docs/guides/avoid-bot-blocks/#keep-a-session-between-runs).
+
 ### After a relay restart
 
 Nodes reconnect on their own and list the contexts they still hold, so existing tokens keep working. It takes up to about 15 seconds. Until they reconnect, the relay does not know their slots, so `isAlive()` can say `false` for a slot that is about to come back. Give it that long before deciding a browser is gone.

@@ -21,6 +21,12 @@ var (
 	// Test for it with errors.Is; the error also unwraps to an *[Error] with Status 429.
 	ErrQuotaExceeded = errors.New("this API key's quota of browsers is used up")
 
+	// ErrUnsupported is what [Client.Acquire] fails with when it asked for a proxy, a time zone, a language or a node label
+	// and the box cannot give it: no node it has can (HTTP 422), or the box is older than the option and would have answered
+	// with a plain browser, which here is a browser that goes out from the box's own address. Nothing is left running: a
+	// browser made without what was asked for is released first. Test for it with errors.Is.
+	ErrUnsupported = errors.New("the box cannot give the browser that was asked for")
+
 	// ErrInvalidArgument marks a call refused before anything was sent, because an option is one the box would
 	// refuse (a run id that is too long, a lifetime out of range) or an address that is not usable.
 	ErrInvalidArgument = errors.New("invalid argument")
@@ -78,6 +84,11 @@ func forbidden() *Error {
 
 func quotaExceeded() *Error {
 	return &Error{Status: 429, Code: "quota_exceeded", Message: ErrQuotaExceeded.Error(), cause: ErrQuotaExceeded}
+}
+
+// unsupported is [ErrUnsupported] with the box's own reason. Status is 0 for a box that did not say (an older one).
+func unsupported(status int, format string, args ...any) *Error {
+	return &Error{Status: status, Code: "unsupported", Message: fmt.Sprintf(format, args...), cause: ErrUnsupported}
 }
 
 func invalid(format string, args ...any) error {

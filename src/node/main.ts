@@ -16,7 +16,22 @@
  *                                            'process': a Chromium per slot (more memory, stronger isolation, and a
  *                                            slot's client gets page.pdf(), tracing and browser.newContext())
  *   BROWSERBAY_CHROMIUM_SANDBOX              'true' keeps Chromium's own sandbox on (needs user namespaces)
- *   BROWSERBAY_HEADLESS                      'false' for a headful browser (needs a display)
+ *   BROWSERBAY_HEADLESS                      'true' (default): no display, `--headless=new`. 'xvfb': a headful browser on
+ *                                            a virtual display the node starts (the image's default; needs Xvfb, and
+ *                                            drops the HeadlessChrome user agent). 'false': a headful browser on the
+ *                                            display the environment names (DISPLAY)
+ *   BROWSERBAY_NODE_LABELS                   comma-separated names for this node (`residential,eu`): a slot can ask for them with
+ *                                            `nodeLabels`, and only a node that has them all gets it
+ *   BROWSERBAY_NODE_EXCLUSIVE                'true': only slots that ask for one of this node's labels are placed on it, so
+ *                                            ordinary slots do not fill (say) a machine on a home connection
+ *   BROWSERBAY_WEB_BOT_AUTH                  'off' (default), 'optional' (sign the slots that ask with `signRequests: true`) or
+ *                                            'always' (sign every slot's requests, as Web Bot Auth). Needs the next two
+ *   BROWSERBAY_WEB_BOT_AUTH_KEY              the private Ed25519 key, as a JWK in JSON (`browserbay web-bot-auth`)
+ *   BROWSERBAY_WEB_BOT_AUTH_AGENT            where this box says it is: the https address the relay is served at
+ *   BROWSERBAY_WEB_BOT_AUTH_FORMAT           'legacy' (default: the spelling Cloudflare verifies) or 'dictionary' (the IETF draft's)
+ *   BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS      how long a signature is good for (default 60)
+ *   BROWSERBAY_WEBDRIVER_FLAG                'hide' (default) turns navigator.webdriver off, which driving a browser over
+ *                                            DevTools would otherwise turn on; 'keep' leaves it on
  *   BROWSERBAY_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory); with
  *                                            BROWSERBAY_ISOLATION=process, where each slot's profile is made
  *   BROWSERBAY_CHROMIUM_EXECUTABLE           a Chromium other than the one in the image
@@ -27,16 +42,24 @@
  */
 import { hostname } from 'node:os'
 import { errorMessage } from '../errors.js'
-import { NODE_LIMITS } from '../protocol.js'
+import { LABEL_LIMITS, NAME_PATTERN, NODE_LIMITS } from '../protocol.js'
 import type { AgentLogger } from './agent.js'
 import { ConfigError, startBrowserNode, type BrowserNode, type Isolation } from './browser-node.js'
+import type { Display } from './chromium.js'
+import { parseAgent, parseSigningKey } from '../web-bot-auth.js'
+import type { WebBotAuthSettings } from './signing.js'
 
 export interface NodeSettings {
   nodeId: string
   maxContexts: number
   drainSeconds: number
   profileDir: string | undefined
-  headless: boolean
+  display: Display
+  hideWebdriver: boolean
+  labels: string[]
+  exclusive: boolean
+  /** Left out when the node does not sign. */
+  webBotAuth?: WebBotAuthSettings
   sandbox: boolean
   isolation: Isolation
 }
@@ -67,13 +90,74 @@ export function parseNodeSettings(env: NodeJS.ProcessEnv = process.env): NodeSet
   if (isolation !== 'context' && isolation !== 'process') {
     throw new Error('BROWSERBAY_ISOLATION must be "context" or "process".')
   }
+  const displayText = (env.BROWSERBAY_HEADLESS ?? '').trim().toLowerCase() || 'true'
+  if (displayText !== 'true' && displayText !== 'false' && displayText !== 'xvfb') {
+    throw new Error('BROWSERBAY_HEADLESS must be "true", "false" or "xvfb".')
+  }
+  const display: Display = displayText === 'true' ? 'headless' : displayText === 'false' ? 'host' : 'xvfb'
+  const webdriver = (env.BROWSERBAY_WEBDRIVER_FLAG ?? '').trim().toLowerCase() || 'hide'
+  if (webdriver !== 'hide' && webdriver !== 'keep')
+    throw new Error('BROWSERBAY_WEBDRIVER_FLAG must be "hide" or "keep".')
+  // Empty or blank is "not set", as everywhere else; the relay would drop a label it cannot use, so refuse it here.
+  const labels = (env.BROWSERBAY_NODE_LABELS ?? '')
+    .split(',')
+    .map((label) => label.trim())
+    .filter(Boolean)
+  if (labels.length > LABEL_LIMITS.maxPerNode) {
+    throw new Error(`BROWSERBAY_NODE_LABELS may name at most ${LABEL_LIMITS.maxPerNode} labels.`)
+  }
+  for (const label of labels) {
+    if (label.length > LABEL_LIMITS.maxLength || !NAME_PATTERN.test(label)) {
+      throw new Error(
+        `BROWSERBAY_NODE_LABELS: a label may only contain letters, digits, "_", "." and "-" (up to ${LABEL_LIMITS.maxLength} characters).`
+      )
+    }
+  }
+  const signingMode = (env.BROWSERBAY_WEB_BOT_AUTH ?? '').trim().toLowerCase() || 'off'
+  if (signingMode !== 'off' && signingMode !== 'optional' && signingMode !== 'always') {
+    throw new Error('BROWSERBAY_WEB_BOT_AUTH must be "off", "optional" or "always".')
+  }
+  let webBotAuth: WebBotAuthSettings | undefined
+  if (signingMode !== 'off') {
+    const key = (env.BROWSERBAY_WEB_BOT_AUTH_KEY ?? '').trim()
+    if (!key)
+      throw new Error(
+        `BROWSERBAY_WEB_BOT_AUTH=${signingMode} needs BROWSERBAY_WEB_BOT_AUTH_KEY (make one with \`browserbay web-bot-auth\`).`
+      )
+    parseSigningKey(key)
+    const agentText = (env.BROWSERBAY_WEB_BOT_AUTH_AGENT ?? '').trim()
+    if (!agentText)
+      throw new Error(
+        `BROWSERBAY_WEB_BOT_AUTH=${signingMode} needs BROWSERBAY_WEB_BOT_AUTH_AGENT: the https address your relay is served at.`
+      )
+    const agent = parseAgent(agentText)
+    const format = (env.BROWSERBAY_WEB_BOT_AUTH_FORMAT ?? '').trim().toLowerCase() || 'legacy'
+    if (format !== 'legacy' && format !== 'dictionary')
+      throw new Error('BROWSERBAY_WEB_BOT_AUTH_FORMAT must be "legacy" or "dictionary".')
+    const ttlText = (env.BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS ?? '').trim()
+    const ttlSeconds = ttlText === '' ? 60 : Number(ttlText)
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 10 || ttlSeconds > 86_400) {
+      throw new Error('BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS must be a whole number of seconds from 10 to 86400.')
+    }
+    webBotAuth = { mode: signingMode, key, agent, format, ttlSeconds }
+  }
+  const exclusive = env.BROWSERBAY_NODE_EXCLUSIVE === 'true'
+  if (exclusive && labels.length === 0) {
+    throw new Error(
+      'BROWSERBAY_NODE_EXCLUSIVE needs BROWSERBAY_NODE_LABELS: a node with no label could never be asked for.'
+    )
+  }
   return {
     nodeId,
     maxContexts,
     drainSeconds,
     isolation,
     profileDir: env.BROWSERBAY_PROFILE_DIR || undefined,
-    headless: env.BROWSERBAY_HEADLESS !== 'false',
+    display,
+    hideWebdriver: webdriver === 'hide',
+    labels: [...new Set(labels)],
+    exclusive,
+    ...(webBotAuth ? { webBotAuth } : {}),
     sandbox: env.BROWSERBAY_CHROMIUM_SANDBOX === 'true'
   }
 }
