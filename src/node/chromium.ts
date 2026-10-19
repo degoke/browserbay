@@ -43,12 +43,15 @@ export function chromiumArgs({
   profileDir,
   display = 'headless',
   sandbox = false,
-  hideWebdriver = true
+  hideWebdriver = true,
+  extraArgs = []
 }: {
   profileDir: string
   display?: Display
   sandbox?: boolean
   hideWebdriver?: boolean
+  /** What a slot's own browser is started with beyond the usual (see `slotBrowser`). They come before the start page. */
+  extraArgs?: string[]
 }): string[] {
   return [
     '--remote-debugging-pipe',
@@ -77,8 +80,38 @@ export function chromiumArgs({
           // headless one always had it. On the host's own display it is the host's call: it has a GPU, or the operator's flags.
           ...(display === 'xvfb' ? ['--ozone-platform=x11', '--enable-unsafe-swiftshader'] : [])
         ]),
+    ...extraArgs,
     'about:blank'
   ]
+}
+
+/**
+ * What a slot's own Chromium (BROWSERBAY_ISOLATION=process) is started with for what the slot asked: its time zone and language,
+ * which a browser takes when it starts and a shared one cannot take per slot, and, for a proxied slot, a WebRTC policy.
+ *
+ * WebRTC can send UDP past an HTTP or SOCKS proxy, to a STUN server, and so tell a page the machine's real address. With
+ * `disable_non_proxied_udp` it uses no UDP that does not go through the proxy.
+ *
+ * The language is set three ways because Linux Chromium reads it from the environment (LANGUAGE first), and a flag for what it
+ * puts in `Accept-Language` and `navigator.languages`.
+ */
+export function slotBrowser(slot: { proxied?: boolean; timezone?: string; locale?: string }) {
+  const env: Record<string, string> = {}
+  const args: string[] = []
+  if (slot.proxied) args.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp')
+  if (slot.timezone) env.TZ = slot.timezone
+  if (slot.locale) {
+    const language = slot.locale.split('-')[0]!
+    const posix = slot.locale.replace(/-/g, '_')
+    env.LANG = `${posix}.UTF-8`
+    env.LC_ALL = env.LANG
+    env.LANGUAGE = posix === language ? language : `${posix}:${language}`
+    args.push(
+      `--lang=${slot.locale}`,
+      `--accept-lang=${posix === language ? slot.locale : `${slot.locale},${language}`}`
+    )
+  }
+  return { env, args }
 }
 
 /**
@@ -124,12 +157,13 @@ const CHROMIUM_ENV = new Set([
  * need LIBGL_*, MESA_*, GTK_*, DBUS_SESSION_BUS_ADDRESS or a custom CA variable): comma-separated variable names. It
  * can never pass the box's own settings, whatever it lists.
  *
- * `display` names a virtual display the node started for this browser (xvfb.ts). It replaces whatever display the node's own
- * environment named, and drops the Wayland socket, so the browser can only ever open on the virtual one.
+ * `overrides` is what this browser is given whatever the node's own environment says: a virtual display the node started for it
+ * (xvfb.ts), and a slot's time zone and language (`slotBrowser`). A display replaces the node's own and drops the Wayland
+ * socket, so the browser can only ever open on the virtual one.
  */
 export function chromiumEnv(
   env: NodeJS.ProcessEnv = process.env,
-  display?: { DISPLAY: string; XAUTHORITY: string }
+  overrides?: Record<string, string>
 ): Record<string, string | undefined> {
   const extra = new Set(
     (env.BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH ?? '')
@@ -140,7 +174,7 @@ export function chromiumEnv(
   const allowed: Record<string, string | undefined> = Object.fromEntries(
     Object.entries(env).filter(([name]) => CHROMIUM_ENV.has(name) || extra.has(name) || name.startsWith('LC_'))
   )
-  if (!display) return allowed
-  delete allowed.WAYLAND_DISPLAY
-  return { ...allowed, ...display }
+  if (!overrides) return allowed
+  if ('DISPLAY' in overrides) delete allowed.WAYLAND_DISPLAY
+  return { ...allowed, ...overrides }
 }

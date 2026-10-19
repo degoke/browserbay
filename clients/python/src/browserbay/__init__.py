@@ -17,9 +17,10 @@ from ._client import (
     NoCapacityError,
     QuotaExceededError,
     Slot,
+    UnsupportedError,
     __version__,
 )
-from ._types import NodeSummary, SlotSummary, StoredSlot
+from ._types import NodeSummary, Proxy, SlotSummary, StoredSlot
 
 __all__ = [
     "AsyncBrowserBay",
@@ -30,8 +31,10 @@ __all__ = [
     "NoCapacityError",
     "QuotaExceededError",
     "NodeSummary",
+    "Proxy",
     "Slot",
     "SlotSummary",
     "StoredSlot",
+    "UnsupportedError",
     "__version__",
 ]

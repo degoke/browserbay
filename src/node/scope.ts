@@ -26,6 +26,9 @@
  * code is tested against a fake Chromium and run against a real one.
  */
 
+import { proxyRulesAllowed } from '../proxy-address.js'
+import type { SlotOptions } from '../protocol.js'
+
 export interface ScopeUpstream {
   /** Sends one DevTools message (JSON text) to the real browser. */
   send(text: string): void
@@ -49,10 +52,19 @@ export interface ScopeLogger {
   warn?(message: string, fields?: Record<string, unknown>): void
 }
 
+/**
+ * What the hub applies to a run's context when it makes it. The values are the node's own: for a proxy, the address of a
+ * forwarder the node started for the slot (proxy-forwarder.ts), never an address a client chose.
+ */
+export interface RunContext {
+  proxyServer?: string
+  proxyBypassList?: string
+}
+
 export interface CdpScope {
   /** Takes over the browser: learns what exists, then becomes its only auto-attacher. Call once, before any run. */
   start(): Promise<void>
-  createRun(runKey: string): Promise<{ contextId: string }>
+  createRun(runKey: string, context?: RunContext): Promise<{ contextId: string }>
   disposeRun(runKey: string): Promise<void>
   hasRun(runKey: string): boolean
   runKeys(): string[]
@@ -66,7 +78,8 @@ export interface CdpScope {
  * Chromium of its own per slot. `CdpScope` is the first; node/process-host.ts is the second.
  */
 export interface RunHost {
-  createRun(runKey: string): Promise<unknown>
+  /** Makes the slot's browser. `options` is what the slot asked for; a host that cannot do all of it fails, never makes less. */
+  createRun(runKey: string, options?: SlotOptions): Promise<unknown>
   disposeRun(runKey: string): Promise<void>
   connect(runKey: string, transport: ScopeTransport): ScopeClient
   /** Told when a run's browser ends on its own (its Chromium crashed), so the node can end the slot instead of reporting it live. */
@@ -144,6 +157,8 @@ interface SessionRecord {
 }
 
 interface Run {
+  /** What the run's context was made with. A context a client of a dedicated browser makes starts from it. */
+  proxy?: RunContext
   contextId: string
   /** The run's own context and, on a dedicated browser, any the client made (all of them are the run's). */
   contexts: Set<string>
@@ -620,9 +635,25 @@ export function createCdpScope({
     const run = runs.get(client.runKey)
     if (!run) return
     const params = message.params ?? {}
-    const allowed = Object.fromEntries(
+    const allowed: Params = Object.fromEntries(
       CREATE_CONTEXT_PARAMS.filter((key) => key in params).map((key) => [key, params[key]])
     )
+    // A proxy the client picks for its own context may not be one that reaches the node itself: the node's loopback holds the
+    // forwarders of every other slot here, and (in a box) the relay.
+    if (
+      allowed.proxyServer !== undefined &&
+      (typeof allowed.proxyServer !== 'string' || !proxyRulesAllowed(allowed.proxyServer))
+    ) {
+      log('warn', 'A context on a refused proxy was not created', { runKey: client.runKey })
+      return client.sendError(message.id, ERR_INVALID_PARAMS, 'This proxy cannot be used on a slot')
+    }
+    // A slot with a proxy keeps it for the contexts its client makes, unless the client names another.
+    if (allowed.proxyServer === undefined && run.proxy?.proxyServer) {
+      allowed.proxyServer = run.proxy.proxyServer
+      if (allowed.proxyBypassList === undefined && run.proxy.proxyBypassList) {
+        allowed.proxyBypassList = run.proxy.proxyBypassList
+      }
+    }
     let created: string | undefined
     try {
       const result = await request('Target.createBrowserContext', { ...allowed, disposeOnDetach: false })
@@ -839,19 +870,27 @@ export function createCdpScope({
   /** Keys whose context is still being made: reserved at once, so two creates for one key cannot both pass the check. */
   const creating = new Set<string>()
 
-  async function createRun(runKey: string) {
+  async function createRun(runKey: string, context?: RunContext) {
     if (runs.has(runKey) || creating.has(runKey)) throw new Error('This slot already has a browser context')
     creating.add(runKey)
     try {
-      return await makeRun(runKey)
+      return await makeRun(runKey, context)
     } finally {
       creating.delete(runKey)
     }
   }
 
-  async function makeRun(runKey: string) {
+  async function makeRun(runKey: string, context?: RunContext) {
     // disposeOnDetach:false, so a client disconnecting (a service handing the browser to a person) leaves the context alone.
-    const { browserContextId } = await request('Target.createBrowserContext', { disposeOnDetach: false })
+    const { browserContextId } = await request('Target.createBrowserContext', {
+      disposeOnDetach: false,
+      ...(context?.proxyServer
+        ? {
+            proxyServer: context.proxyServer,
+            ...(context.proxyBypassList ? { proxyBypassList: context.proxyBypassList } : {})
+          }
+        : {})
+    })
     // Files would land on this machine, outside any run's control. Denied from the start, not only if a client asks.
     await request('Browser.setDownloadBehavior', { behavior: 'deny', eventsEnabled: false, browserContextId }).catch(
       (error) => {
@@ -860,6 +899,14 @@ export function createCdpScope({
       }
     )
     runs.set(runKey, {
+      ...(context?.proxyServer
+        ? {
+            proxy: {
+              proxyServer: context.proxyServer,
+              ...(context.proxyBypassList ? { proxyBypassList: context.proxyBypassList } : {})
+            }
+          }
+        : {}),
       contextId: browserContextId,
       contexts: new Set([browserContextId]),
       controller: null,

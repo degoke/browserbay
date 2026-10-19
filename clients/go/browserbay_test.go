@@ -46,6 +46,9 @@ type fakeOptions struct {
 	prefix       string
 	createStatus int
 	createBody   string
+	// modern makes the box answer like one that knows the slot options: "applied" names the ones in the request. Off, it
+	// is a box that predates them and says nothing.
+	modern       bool
 	deleteStatus func(slotID string) int
 	listStatus   int
 	// slotLookups scripts the next lookups before the table answers: "network" or an HTTP status.
@@ -65,6 +68,8 @@ type fakeBox struct {
 	order   []string
 	lookups []any
 	counter int
+	// nodesBody, when set, is what GET /v1/nodes answers.
+	nodesBody string
 }
 
 func newFakeBox(opts fakeOptions) *fakeBox {
@@ -201,7 +206,7 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.opts.createStatus != 0 && f.opts.createStatus != 201 {
-			reply(w, f.opts.createStatus, "")
+			reply(w, f.opts.createStatus, f.opts.createBody)
 			return
 		}
 		if f.opts.createBody != "" {
@@ -216,7 +221,17 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.slots[id] = slot
 		f.order = append(f.order, id)
-		reply(w, 201, asJSON(map[string]any{"slotId": id, "token": slot.token, "nodeId": slot.nodeID}))
+		created := map[string]any{"slotId": id, "token": slot.token, "nodeId": slot.nodeID}
+		if f.opts.modern {
+			applied := []string{}
+			for _, name := range []string{"proxy", "timezone", "locale", "nodeLabels"} {
+				if _, ok := body[name]; ok {
+					applied = append(applied, name)
+				}
+			}
+			created["applied"] = applied
+		}
+		reply(w, 201, asJSON(created))
 	case path == "/v1/slots" && r.Method == http.MethodGet:
 		if !asOwner {
 			reply(w, 401, `{"error":"unauthorized"}`)
@@ -236,6 +251,10 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/v1/nodes" && r.Method == http.MethodGet:
 		if !asOwner {
 			reply(w, 401, `{"error":"unauthorized"}`)
+			return
+		}
+		if f.nodesBody != "" {
+			reply(w, 200, f.nodesBody)
 			return
 		}
 		reply(w, 200, asJSON(map[string]any{"nodes": []map[string]any{{
@@ -1123,7 +1142,7 @@ func TestNodesListsTheMachinesThatRunTheBoxesBrowsers(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := browserbay.NodeSummary{NodeID: "node-1", MaxContexts: 5, Contexts: 1, LastSeenAt: time.Date(2026, 10, 11, 11, 59, 58, 0, time.UTC)}
-	if len(nodes) != 1 || nodes[0] != want {
+	if len(nodes) != 1 || asJSON(nodes[0]) != asJSON(want) {
 		t.Errorf("nodes: %+v, want %+v", nodes, want)
 	}
 	if got := f.callLog()[0].Header.Get("Authorization"); got != "Bearer "+apiKey {
@@ -1392,5 +1411,175 @@ func TestErrorsReadWell(t *testing.T) {
 	var apiErr *browserbay.Error
 	if !errors.As(wrapped, &apiErr) || apiErr.Status != 418 {
 		t.Error("errors.As")
+	}
+}
+
+// ---- slot options ----------------------------------------------------------------------------------------------------
+
+const proxyPassword = "go-client-must-not-show-this-password"
+
+func TestAcquireSendsAProxyATimeZoneALanguageAndNodeLabelsWhenAskedFor(t *testing.T) {
+	f := newFakeBox(fakeOptions{modern: true})
+	c := newClient(t, f)
+	slot, err := c.Acquire(background(), browserbay.AcquireOptions{
+		RunID: "run-1", MaxLifetime: 3000 * time.Second,
+		Proxy:      &browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "user", Password: proxyPassword, Bypass: "*.internal.test"},
+		Timezone:   "Europe/Berlin",
+		Locale:     "de-DE",
+		NodeLabels: []string{"home", "eu"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"runId": "run-1", "maxLifetimeSeconds": 3000.0, "waitMs": 30000.0,
+		"proxy":    map[string]any{"server": "http://proxy.example.com:8080", "username": "user", "password": proxyPassword, "bypass": "*.internal.test"},
+		"timezone": "Europe/Berlin", "locale": "de-DE", "nodeLabels": []any{"home", "eu"},
+	}
+	if got := f.callLog()[0].Body; asJSON(got) != asJSON(want) {
+		t.Errorf("body: %v, want %v", got, want)
+	}
+	stored, _ := json.Marshal(slot)
+	if strings.Contains(string(stored), proxyPassword) {
+		t.Errorf("a stored slot carries the proxy password: %s", stored)
+	}
+
+	// Only what is asked for is sent: no key for an option left out, and none for an empty list of labels.
+	g := newFakeBox(fakeOptions{modern: true})
+	if _, err := newClient(t, g).Acquire(background(), browserbay.AcquireOptions{RunID: "run-2", MaxLifetime: 3000 * time.Second, Timezone: "UTC", NodeLabels: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := g.callLog()[0].Body, map[string]any{"runId": "run-2", "maxLifetimeSeconds": 3000.0, "waitMs": 30000.0, "timezone": "UTC"}; asJSON(got) != asJSON(want) {
+		t.Errorf("body: %v, want %v", got, want)
+	}
+}
+
+func TestAcquireWithoutOptionsIsTheRequestABoxHasAlwaysTaken(t *testing.T) {
+	f := newFakeBox(fakeOptions{}) // an old box: it says nothing of what it applied
+	if _, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{RunID: "run-1", MaxLifetime: 3000 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.slotIDs()) != 1 {
+		t.Errorf("slots: %v", f.slotIDs())
+	}
+}
+
+func TestAcquireOnABoxThatPredatesTheOptionsReleasesTheBrowserAndRefuses(t *testing.T) {
+	f := newFakeBox(fakeOptions{})
+	_, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{
+		RunID: "run-1", MaxLifetime: 3000 * time.Second,
+		Proxy: &browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "u", Password: proxyPassword},
+	})
+	if !errors.Is(err, browserbay.ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "did not apply proxy") || !strings.Contains(err.Error(), "older") || strings.Contains(err.Error(), proxyPassword) {
+		t.Errorf("message: %q", err)
+	}
+	var apiErr *browserbay.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "unsupported" {
+		t.Errorf("error: %#v", apiErr)
+	}
+	methods := []string{}
+	for _, c := range f.callLog() {
+		methods = append(methods, c.Method)
+	}
+	if strings.Join(methods, " ") != "POST DELETE" {
+		t.Errorf("calls: %v, want the browser made without the proxy to be released", methods)
+	}
+	if len(f.slotIDs()) != 0 {
+		t.Errorf("slots left: %v", f.slotIDs())
+	}
+}
+
+func TestAcquireOnABoxThatAppliedOnlySomeIsRefusedTooAndSaysWhich(t *testing.T) {
+	f := newFakeBox(fakeOptions{createBody: `{"slotId":"slot-9","token":"t","nodeId":"n","applied":["timezone"]}`})
+	_, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{
+		RunID: "run-1", MaxLifetime: 3000 * time.Second,
+		Proxy: &browserbay.ProxyOptions{Server: "http://p.example:1"}, Timezone: "UTC", Locale: "fr",
+	})
+	if !errors.Is(err, browserbay.ErrUnsupported) || !strings.Contains(err.Error(), "did not apply proxy, locale") {
+		t.Fatalf("err = %v", err)
+	}
+	calls := f.callLog()
+	if len(calls) != 2 || calls[1].Method != "DELETE" || calls[1].Path != "/v1/slots/slot-9" {
+		t.Errorf("calls: %+v", calls)
+	}
+}
+
+func TestAcquireWhenTheBrowserCannotBeReleasedSaysSoAndStillRefuses(t *testing.T) {
+	var warned []string
+	f := newFakeBox(fakeOptions{deleteStatus: func(string) int { return 500 }})
+	c := newClient(t, f, with(func(o *browserbay.Options) {
+		o.Logger = browserbay.LoggerFunc(func(message string, fields map[string]any) { warned = append(warned, message+fmt.Sprint(fields)) })
+	})...)
+	_, err := c.Acquire(background(), browserbay.AcquireOptions{RunID: "r", MaxLifetime: 3000 * time.Second, Proxy: &browserbay.ProxyOptions{Server: "http://p.example:1", Username: "u", Password: proxyPassword}})
+	if !errors.Is(err, browserbay.ErrUnsupported) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(warned) != 1 || strings.Contains(warned[0], proxyPassword) {
+		t.Errorf("warnings: %v", warned)
+	}
+}
+
+func TestAcquire422IsUnsupportedWithTheBoxsReasonAnd400SaysWhatWasWrong(t *testing.T) {
+	f := newFakeBox(fakeOptions{createStatus: 422, createBody: `{"error":"unsupported","message":"No node offers proxy"}`})
+	_, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{RunID: "r", MaxLifetime: 3000 * time.Second, Proxy: &browserbay.ProxyOptions{Server: "http://p.example:1", Username: "u", Password: proxyPassword}})
+	var apiErr *browserbay.Error
+	if !errors.Is(err, browserbay.ErrUnsupported) || !errors.As(err, &apiErr) || apiErr.Status != 422 || !strings.Contains(err.Error(), "No node offers proxy") || strings.Contains(err.Error(), proxyPassword) {
+		t.Errorf("err = %v (%+v)", err, apiErr)
+	}
+	if len(f.callLog()) != 1 {
+		t.Errorf("nothing was made, so nothing is released: %d calls", len(f.callLog()))
+	}
+
+	g := newFakeBox(fakeOptions{createStatus: 400, createBody: `{"error":"invalid_request","message":"proxy.server must be http://host:port"}`})
+	_, err = newClient(t, g).Acquire(background(), browserbay.AcquireOptions{RunID: "r", MaxLifetime: 3000 * time.Second, Proxy: &browserbay.ProxyOptions{Server: "nope"}})
+	if errors.Is(err, browserbay.ErrUnsupported) || !errors.As(err, &apiErr) || apiErr.Status != 400 || apiErr.Code != "invalid_request" || !strings.Contains(err.Error(), "proxy.server must be") {
+		t.Errorf("err = %v (%+v)", err, apiErr)
+	}
+	// A 400 with no message (an older box) is still a plain refusal.
+	h := newFakeBox(fakeOptions{createStatus: 400})
+	_, err = newClient(t, h).Acquire(background(), browserbay.AcquireOptions{RunID: "r", MaxLifetime: 3000 * time.Second})
+	if err == nil || !strings.HasSuffix(err.Error(), "refused the request (400)") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestAcquireRefusesAProxyWithoutAServerBeforeSendingAnything(t *testing.T) {
+	f := newFakeBox(fakeOptions{modern: true})
+	_, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{RunID: "r", MaxLifetime: 3000 * time.Second, Proxy: &browserbay.ProxyOptions{Username: "u"}})
+	if !errors.Is(err, browserbay.ErrInvalidArgument) || len(f.callLog()) != 0 {
+		t.Errorf("err = %v, calls = %d", err, len(f.callLog()))
+	}
+}
+
+func TestAProxyHidesItsPasswordWhateverWayItIsPrinted(t *testing.T) {
+	p := browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "user", Password: proxyPassword}
+	for _, shown := range []string{
+		fmt.Sprint(p), fmt.Sprintf("%v", p), fmt.Sprintf("%+v", p), fmt.Sprintf("%#v", p), p.String(),
+		fmt.Sprint(&p), fmt.Sprintf("%v", []browserbay.ProxyOptions{p}), fmt.Sprintf("%+v", browserbay.AcquireOptions{Proxy: &p}),
+	} {
+		if strings.Contains(shown, proxyPassword) {
+			t.Errorf("a printed proxy shows its password: %s", shown)
+		}
+	}
+	if !strings.Contains(p.String(), `Password: "***"`) || !strings.Contains((&browserbay.ProxyOptions{Server: "x"}).String(), `Password: ""`) {
+		t.Errorf("redaction: %s", p.String())
+	}
+}
+
+func TestNodesSayWhatTheyCanDoWhatTheyAreCalledAndWhetherTheyAreKeptForTheirLabels(t *testing.T) {
+	f := newFakeBox(fakeOptions{})
+	f.nodesBody = `{"nodes":[{"nodeId":"home","maxContexts":2,"features":["proxy","locale"],"labels":["home"],"exclusive":true},{"nodeId":"old","maxContexts":2}]}`
+	nodes, err := newClient(t, f).Nodes(background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || strings.Join(nodes[0].Features, ",") != "proxy,locale" || strings.Join(nodes[0].Labels, ",") != "home" || !nodes[0].Exclusive {
+		t.Errorf("home: %+v", nodes)
+	}
+	if len(nodes[1].Features) != 0 || len(nodes[1].Labels) != 0 || nodes[1].Exclusive {
+		t.Errorf("a box that predates them sends none: %+v", nodes[1])
 	}
 }

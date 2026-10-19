@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 from ._client import BrowserBay, Slot
-from ._types import NodeSummary, SlotSummary, StoredSlot
+from ._types import NodeSummary, Proxy, SlotSummary, StoredSlot
 
 
 # `acquire` blocks a thread for up to `wait_ms` while a full box waits for room. On the loop's shared default pool
@@ -125,9 +125,28 @@ class AsyncBrowserBay:
         """The box's address, without trailing slashes."""
         return self._box.url
 
-    async def acquire(self, run_id: str, max_lifetime_seconds: int, wait_ms: int = 30_000) -> AsyncSlot:
+    async def acquire(
+        self,
+        run_id: str,
+        max_lifetime_seconds: int,
+        wait_ms: int = 30_000,
+        *,
+        proxy: Union[Proxy, Mapping[str, Any], None] = None,
+        timezone: Optional[str] = None,
+        locale: Optional[str] = None,
+        node_labels: Optional[Sequence[str]] = None,
+    ) -> AsyncSlot:
         """Takes a browser; see :meth:`BrowserBay.acquire`. Raises ``NoCapacityError`` when the box stays full."""
-        call = functools.partial(self._box.acquire, run_id, max_lifetime_seconds, wait_ms)
+        call = functools.partial(
+            self._box.acquire,
+            run_id,
+            max_lifetime_seconds,
+            wait_ms,
+            proxy=proxy,
+            timezone=timezone,
+            locale=locale,
+            node_labels=node_labels,
+        )
         slot = await asyncio.get_running_loop().run_in_executor(self._acquire_pool, call)
         return AsyncSlot(slot)
 

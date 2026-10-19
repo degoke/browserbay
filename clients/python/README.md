@@ -33,13 +33,16 @@ with sync_playwright() as p, box.acquire(run_id="task-42", max_lifetime_seconds=
 
 `acquire` waits up to `wait_ms` (default 30000) for a free slot. `max_lifetime_seconds` (60 to 86400) is a hard stop: the box closes the browser after that long whether or not anyone is connected. `run_id` is your own id for what the browser is for; `list()` and `reap()` hand it back to you.
 
+`acquire` also takes `proxy` (a `Proxy`, or a dict with `server`, `username`, `password` and `bypass`), `timezone` (`"Europe/Berlin"`), `locale` (`"de-DE"`) and `node_labels`, by keyword. The proxy's credentials stay on the box's node, and `Proxy`'s `repr` hides the password. When the box cannot give what was asked for (no node can, or the box is older than the options and would have made a plain browser, which is released first) it raises `UnsupportedError`.
+
 ## The client
 
 ```python
 box = BrowserBay(url, api_key, namespace=None, allow_other_boxes=None, logger=None,
                  timeout=15.0, lookup_timeout=3.0, release_timeout=10.0, retry_delay=0.3)
 
-box.acquire(run_id, max_lifetime_seconds, wait_ms=30000)  # -> Slot
+box.acquire(run_id, max_lifetime_seconds, wait_ms=30000,
+            proxy=None, timezone=None, locale=None, node_labels=None)  # -> Slot
 box.slot(stored)                     # a Slot from what you saved earlier; makes no request
 box.release(slot_id, url=None)       # releases a slot you only know the id of
 box.list()                           # -> [SlotSummary] (this namespace's, if you set one)

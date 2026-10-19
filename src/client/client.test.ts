@@ -6,7 +6,9 @@ import {
   ForbiddenError,
   NoCapacityError,
   QuotaExceededError,
+  UnsupportedError,
   createBrowserBay,
+  type AcquireOptions,
   type BrowserBayOptions
 } from './index.js'
 
@@ -40,6 +42,8 @@ function fakeBox(
     prefix?: string
     createStatus?: number
     createBody?: unknown
+    /** Answers like a box that knows the slot options: `applied` names the ones in the request. Off, it is a box that predates them. */
+    modern?: boolean
     deleteStatus?: (slotId: string) => number
     listStatus?: number
     slotLookups?: Array<'network' | number>
@@ -79,8 +83,10 @@ function fakeBox(
 
     if (path === '/v1/slots' && method === 'POST') {
       if (!asOwner) return reply(401, { error: 'unauthorized' })
-      if (options.createStatus && options.createStatus !== 201) return reply(options.createStatus)
+      if (options.createStatus && options.createStatus !== 201) return reply(options.createStatus, options.createBody)
       if (options.createBody !== undefined) return reply(201, options.createBody)
+      const sent = JSON.parse(String(init?.body))
+      const applied = ['proxy', 'timezone', 'locale', 'nodeLabels'].filter((name) => name in sent)
       const slotId = `slot-${++counter}`
       const slot: BoxSlot = {
         slotId,
@@ -90,7 +96,7 @@ function fakeBox(
         token: `slot-token-${counter}-PLAINTEXT`
       }
       slots.set(slotId, slot)
-      return reply(201, { slotId, token: slot.token, nodeId: slot.nodeId })
+      return reply(201, { slotId, token: slot.token, nodeId: slot.nodeId, ...(options.modern ? { applied } : {}) })
     }
 
     if (path === '/v1/slots' && method === 'GET') {
@@ -139,7 +145,7 @@ function client(fetchImpl: typeof fetch, options: Partial<BrowserBayOptions> = {
   return createBrowserBay({ url: BOX, apiKey: API_KEY, fetch: fetchImpl, now: () => NOW, retryDelayMs: 0, ...options })
 }
 
-const acquireOptions = (runId: string, extra: { waitMs?: number } = {}) => ({
+const acquireOptions = (runId: string, extra: Partial<AcquireOptions> = {}): AcquireOptions => ({
   runId,
   maxLifetimeSeconds: 3000,
   ...extra
@@ -664,4 +670,134 @@ test('client: a slot can be released by its id alone, at the box named, and fail
   )
   await assert.rejects(() => client(box.impl).release(''), /needs a slotId/)
   await assert.rejects(() => client(box.impl).release('x', { url: 'ftp://nope' }), /http\(s\)/)
+})
+
+// ---- slot options ----------------------------------------------------------------------------------------------------
+
+const PASSWORD = 'client-must-not-show-this-password'
+const PROXY = {
+  server: 'http://proxy.example.com:8080',
+  username: 'user',
+  password: PASSWORD,
+  bypass: '*.internal.test'
+}
+
+test('client: a proxy, a time zone, a language and node labels are sent when asked for, and a box that has them hands back the slot', async () => {
+  const box = fakeBox({ modern: true })
+  const slot = await client(box.impl).acquire(
+    acquireOptions('run-1', { proxy: PROXY, timezone: 'Europe/Berlin', locale: 'de-DE', nodeLabels: ['home', 'eu'] })
+  )
+  assert.deepEqual(box.calls[0]!.body, {
+    runId: 'run-1',
+    maxLifetimeSeconds: 3000,
+    waitMs: 30_000,
+    proxy: PROXY,
+    timezone: 'Europe/Berlin',
+    locale: 'de-DE',
+    nodeLabels: ['home', 'eu']
+  })
+  assert.ok(slot.slotId)
+  assert.ok(!JSON.stringify(slot).includes(PASSWORD), 'the slot keeps no proxy credential, so a stored slot has none')
+
+  // Only what is asked for is sent: no key for an option left out, and no labels for an empty list.
+  const some = fakeBox({ modern: true })
+  await client(some.impl).acquire(acquireOptions('run-2', { timezone: 'UTC', nodeLabels: [] }))
+  assert.deepEqual(some.calls[0]!.body, { runId: 'run-2', maxLifetimeSeconds: 3000, waitMs: 30_000, timezone: 'UTC' })
+})
+
+test('client: a box that predates the options would make a plain browser, so the browser is released and the ask is refused', async () => {
+  const box = fakeBox() // answers 201 and says nothing of what it applied
+  await assert.rejects(
+    client(box.impl).acquire(acquireOptions('run-1', { proxy: PROXY })),
+    (error: Error) =>
+      error instanceof UnsupportedError &&
+      error instanceof BrowserBayError &&
+      /did not apply proxy/.test(error.message) &&
+      /older/.test(error.message) &&
+      !error.message.includes(PASSWORD)
+  )
+  assert.deepEqual(
+    box.calls.map((call) => call.method),
+    ['POST', 'DELETE'],
+    'the browser that was made without the proxy was released'
+  )
+  assert.equal(box.slots.size, 0)
+
+  // A plain request to the same old box is as it always was.
+  assert.ok((await client(box.impl).acquire(acquireOptions('run-2'))).slotId)
+  assert.equal(box.slots.size, 1)
+})
+
+test('client: a box that applied only some of what was asked for is refused too, and says which', async () => {
+  const box = fakeBox({ createBody: { slotId: 'slot-9', token: 't', nodeId: 'n', applied: ['timezone'] } })
+  await assert.rejects(
+    client(box.impl).acquire(acquireOptions('run-1', { proxy: PROXY, timezone: 'UTC', locale: 'fr' })),
+    (error: Error) => error instanceof UnsupportedError && /did not apply proxy, locale/.test(error.message)
+  )
+  assert.deepEqual(
+    box.calls.map((call) => `${call.method} ${call.url.pathname}`),
+    ['POST /v1/slots', 'DELETE /v1/slots/slot-9']
+  )
+})
+
+test('client: when it cannot release the browser it was refused, it says so and still refuses the ask', async () => {
+  const warnings: string[] = []
+  const box = fakeBox({ deleteStatus: () => 500 })
+  await assert.rejects(
+    client(box.impl, { logger: { warn: (message) => warnings.push(message) } }).acquire(
+      acquireOptions('r', { proxy: PROXY })
+    ),
+    UnsupportedError
+  )
+  assert.equal(warnings.length, 1)
+  assert.ok(!warnings.join('').includes(PASSWORD))
+})
+
+test('client: 422 is an UnsupportedError that says what no node offers, and 400 says what was wrong with the request', async () => {
+  const unsupported = fakeBox({
+    createStatus: 422,
+    createBody: { error: 'unsupported', message: 'No node offers proxy' }
+  })
+  await assert.rejects(
+    client(unsupported.impl).acquire(acquireOptions('r', { proxy: PROXY })),
+    (error: Error & { status?: number }) =>
+      error instanceof UnsupportedError &&
+      error.status === 422 &&
+      /No node offers proxy/.test(error.message) &&
+      !error.message.includes(PASSWORD)
+  )
+  assert.equal(unsupported.calls.length, 1, 'nothing was made, so nothing is released')
+
+  const refused = fakeBox({
+    createStatus: 400,
+    createBody: { error: 'invalid_request', message: 'proxy.server must be http://host:port' }
+  })
+  await assert.rejects(
+    client(refused.impl).acquire(acquireOptions('r', { proxy: PROXY })),
+    (error: Error & { status?: number }) =>
+      error instanceof BrowserBayError &&
+      !(error instanceof UnsupportedError) &&
+      error.status === 400 &&
+      /proxy\.server must be/.test(error.message)
+  )
+  // A 400 with no message (an older box) is still a plain refusal.
+  const bare = fakeBox({ createStatus: 400 })
+  await assert.rejects(client(bare.impl).acquire(acquireOptions('r')), /refused the request \(400\)$/)
+})
+
+test('client: options of the wrong type are refused before anything is sent', async () => {
+  const box = fakeBox({ modern: true })
+  const bad: Array<Partial<AcquireOptions>> = [
+    { proxy: 'http://proxy.example.com:8080' as never },
+    { proxy: {} as never },
+    { proxy: null as never },
+    { timezone: 5 as never },
+    { locale: {} as never },
+    { nodeLabels: 'home' as never },
+    { nodeLabels: [1] as never }
+  ]
+  for (const options of bad) {
+    await assert.rejects(client(box.impl).acquire(acquireOptions('r', options)), TypeError, JSON.stringify(options))
+  }
+  assert.equal(box.calls.length, 0)
 })

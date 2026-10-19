@@ -90,4 +90,12 @@ Service: a node refuses plain http to another machine unless that opt-in says th
   value: {{ .Values.node.sandbox | toString | quote }}
 - name: BROWSERBAY_HEADLESS
   value: {{ .Values.node.headless | toString | quote }}
+{{- with .Values.node.labels }}
+- name: BROWSERBAY_NODE_LABELS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- if .Values.node.exclusive }}
+- name: BROWSERBAY_NODE_EXCLUSIVE
+  value: "true"
+{{- end }}
 {{- end -}}

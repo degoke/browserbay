@@ -104,6 +104,11 @@ node:
   # for Chromium), and with isolation per process about that much more per slot. true: headless, with no display.
   # false: headful on the pod's own display, which a container does not have.
   headless: xvfb
+  # Names for these nodes (BROWSERBAY_NODE_LABELS), so a client can ask for them with `nodeLabels`: for example
+  # [residential, eu]. Letters, digits, "_", "." and "-", at most 16.
+  labels: []
+  # Take only the slots that ask for one of the labels above, so ordinary slots do not fill these nodes. Needs labels.
+  exclusive: false
 
   resources:
     requests:

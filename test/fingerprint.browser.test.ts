@@ -7,16 +7,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import test from 'node:test'
-import { createBrowserBay } from '../src/client/index.js'
-import { startBrowserNode, type Isolation } from '../src/node/browser-node.js'
-import type { Display } from '../src/node/chromium.js'
-import { hashToken } from '../src/relay/registry.js'
-import { createRelayServer } from '../src/relay/server.js'
-import { connect, enabled, serve, until } from './support.js'
-import { chromium } from 'playwright'
-
-const API_KEY = 'fingerprint-test-api-key-0123456789'
-const SECRET = 'fingerprint-test-enrollment-secret'
+import { connect, enabled, serve, startBox } from './support.js'
 
 const hasXvfb = (() => {
   try {
@@ -26,33 +17,6 @@ const hasXvfb = (() => {
     return false
   }
 })()
-
-async function startBox(options: { display: Display; isolation: Isolation; hideWebdriver?: boolean }) {
-  const relay = createRelayServer({
-    apiKey: API_KEY,
-    enrollmentSecrets: [{ id: 'test', sha256: hashToken(SECRET) }],
-    nodeTimeoutMs: 60_000
-  })
-  const port = await relay.listen(0, '127.0.0.1')
-  const base = `http://127.0.0.1:${port}`
-  const node = await startBrowserNode({
-    relayUrl: base,
-    enrollmentSecret: SECRET,
-    nodeId: 'fingerprint-node',
-    maxContexts: 2,
-    executable: chromium.executablePath(),
-    ...options
-  })
-  await until(() => relay.registry.listNodes().length === 1, 'the node to join', 60_000)
-  const box = createBrowserBay({ url: base, apiKey: API_KEY })
-  return {
-    acquire: (runId: string) => box.acquire({ runId, maxLifetimeSeconds: 600, waitMs: 10_000 }),
-    async close() {
-      await node.close()
-      await relay.close()
-    }
-  }
-}
 
 /** The page's own view of the browser: what a bot detector reads first. */
 const probe = () => ({

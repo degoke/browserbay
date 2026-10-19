@@ -1,5 +1,7 @@
 node:
   relayUrl: https://browsers.example.com
+  labels: [residential, eu]
+  exclusive: true
   autoscaling:
     enabled: true
   networkPolicy:

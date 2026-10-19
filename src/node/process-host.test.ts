@@ -379,3 +379,144 @@ test('process host: headless slots start no display and their browser keeps the 
     await processes.close()
   }
 })
+
+// ---- what a slot asked for: its proxy, time zone and language ----------------------------------------------------------
+
+/** A forwarder for the host to start: it records what it was given and whether it was closed. */
+function fakeForwarders({ failToStart = false } = {}) {
+  const started: Array<{ settings: any; url: string; closed: number }> = []
+  const start = (async (settings: unknown) => {
+    if (failToStart) throw new Error('could not listen')
+    const entry = { settings, url: `socks5://127.9.9.${started.length + 1}:4000`, closed: 0 }
+    started.push(entry)
+    return { url: entry.url, close: async () => void entry.closed++ }
+  }) as unknown as NonNullable<ProcessHostOptions['forwarder']>['start']
+  return { options: { start }, started }
+}
+
+const PROXY = {
+  server: 'http://proxy.example.com:8080',
+  username: 'user',
+  password: 'process-host-secret',
+  bypass: 'a.test'
+}
+
+test('process host: a proxied slot’s browser is made with its forwarder, kept off WebRTC’s own paths, and told no credentials', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  try {
+    await processes.createRun('s1', { proxy: PROXY })
+    await processes.createRun('s2')
+    assert.equal(forwarders.started.length, 1, 'only the proxied slot has one')
+    assert.deepEqual(forwarders.started[0]!.settings, PROXY)
+    const [proxied, plain] = launcher.started
+    assert.deepEqual(proxied!.fake.commands('Target.createBrowserContext').at(-1)!.params, {
+      disposeOnDetach: false,
+      proxyServer: forwarders.started[0]!.url,
+      proxyBypassList: '<-loopback>;a.test'
+    })
+    assert.ok(proxied!.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'))
+    assert.ok(!plain!.args.some((arg) => arg.includes('webrtc')), 'a plain slot keeps WebRTC as it is')
+    assert.ok(
+      !JSON.stringify([proxied!.args, proxied!.env, proxied!.fake.log]).includes('process-host-secret'),
+      'the browser never sees the password'
+    )
+    assert.ok(!JSON.stringify(proxied!.args).includes('proxy.example.com'), 'nor the real proxy')
+
+    await processes.disposeRun('s1')
+    assert.equal(forwarders.started[0]!.closed, 1, 'the forwarder is closed with the slot')
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a slot’s own browser is started in its time zone and language', async () => {
+  const launcher = fakeLauncher()
+  const processes = host(launcher)
+  try {
+    await processes.createRun('s1', { timezone: 'Europe/Berlin', locale: 'de-DE' })
+    await processes.createRun('s2', { locale: 'fr' })
+    await processes.createRun('s3')
+    const [german, french, plain] = launcher.started
+    assert.equal(german!.env.TZ, 'Europe/Berlin')
+    assert.deepEqual(
+      [german!.env.LANG, german!.env.LC_ALL, german!.env.LANGUAGE],
+      ['de_DE.UTF-8', 'de_DE.UTF-8', 'de_DE:de'],
+      'Linux Chromium reads the language from the environment'
+    )
+    assert.ok(german!.args.includes('--lang=de-DE') && german!.args.includes('--accept-lang=de-DE,de'))
+    assert.deepEqual([french!.env.LANGUAGE, french!.args.includes('--accept-lang=fr')], ['fr', true])
+    assert.equal(french!.env.TZ, undefined, 'only what was asked for is set')
+    assert.ok(!('TZ' in plain!.env) && !plain!.args.some((arg) => arg.startsWith('--lang')))
+    assert.ok(
+      plain!.args.at(-1) === 'about:blank' && german!.args.at(-1) === 'about:blank',
+      'the start page stays last'
+    )
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: options the node cannot honour fail the create before anything is made', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  try {
+    await assert.rejects(processes.createRun('s1', { surprise: 1 } as never), /does not know the option/)
+    await assert.rejects(processes.createRun('s2', { timezone: 'Mars/Olympus' }), /timezone/)
+    await assert.rejects(processes.createRun('s3', { proxy: { server: 'http://127.0.0.1:1' } }), /loopback/)
+    assert.equal(launcher.started.length, 0)
+    assert.equal(forwarders.started.length, 0)
+    assert.equal(processes.size(), 0)
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a forwarder is never left behind when its slot cannot be made', async () => {
+  // The forwarder cannot start: no browser, no profile.
+  const root = await mkdtemp(join(tmpdir(), 'browserbay-root-'))
+  const launcher = fakeLauncher()
+  const broken = host(launcher, { profileRoot: root, forwarder: fakeForwarders({ failToStart: true }).options })
+  await assert.rejects(broken.createRun('s1', { proxy: PROXY }), /could not listen/)
+  assert.equal(launcher.started.length, 0)
+  assert.ok(!existsSync(join(root, 's1')))
+
+  // The browser cannot be spawned: the forwarder that was started is closed, and so is the profile.
+  const forwarders = fakeForwarders()
+  const failing = createProcessHost({
+    executable: '/chromium',
+    profileRoot: root,
+    forwarder: forwarders.options,
+    spawnChromium: (() => {
+      throw new Error('spawn EACCES')
+    }) as unknown as NonNullable<ProcessHostOptions['spawnChromium']>
+  })
+  await assert.rejects(failing.createRun('s2', { proxy: PROXY }), /spawn EACCES/)
+  assert.equal(forwarders.started[0]!.closed, 1)
+  assert.ok(!existsSync(join(root, 's2')))
+
+  // The browser starts and never answers: ended, and the forwarder with it.
+  const silentForwarders = fakeForwarders()
+  const silent = host(fakeLauncher({ silent: true }), { startTimeoutMs: 100, forwarder: silentForwarders.options })
+  await assert.rejects(silent.createRun('s3', { proxy: PROXY }), /did not answer/)
+  assert.equal(silentForwarders.started[0]!.closed, 1)
+  await rm(root, { recursive: true, force: true })
+})
+
+test('process host: a proxied slot whose browser dies on its own loses its forwarder too', async () => {
+  const launcher = fakeLauncher()
+  const forwarders = fakeForwarders()
+  const processes = host(launcher, { forwarder: forwarders.options })
+  const ended: string[] = []
+  processes.onRunEnded((runKey) => ended.push(runKey))
+  try {
+    await processes.createRun('s1', { proxy: PROXY })
+    launcher.started[0]!.die('SIGSEGV')
+    await until(() => ended.length === 1, 'the slot to be reported ended')
+    await until(() => forwarders.started[0]!.closed === 1, 'its forwarder to be closed')
+  } finally {
+    await processes.close()
+  }
+})

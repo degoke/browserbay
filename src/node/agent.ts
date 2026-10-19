@@ -23,6 +23,7 @@ import {
   type NodeToRelay,
   type RelayToNode
 } from '../protocol.js'
+import { featuresFor, parseNodeSlotOptions, SlotRefusedError } from '../slot-options.js'
 import type { RunHost, ScopeClient } from './scope.js'
 
 const OPEN = 1
@@ -121,6 +122,15 @@ export interface AgentOptions {
   /** What holds this node's browsers: a started scope hub in front of its Chromium, or a Chromium per slot. */
   scope: RunHost
   maxContexts?: number
+  /**
+   * What this node can do for a slot beyond giving it a browser (NODE_FEATURE), told to the relay so it only sends a slot that
+   * asks for one to a node that has it. A node refuses a `context.create` that needs one it was not given.
+   */
+  features?: string[]
+  /** What this node's operator calls it, told to the relay so a slot can ask for it. */
+  labels?: string[]
+  /** Only take slots that ask for one of this node's labels. */
+  exclusive?: boolean
   heartbeatMs?: number
   reconnectMinMs?: number
   reconnectMaxMs?: number
@@ -161,6 +171,9 @@ export function startAgent({
   nodeId,
   scope,
   maxContexts = 5,
+  features = [],
+  labels = [],
+  exclusive = false,
   heartbeatMs = 5000,
   reconnectMinMs = 500,
   reconnectMaxMs = 15_000,
@@ -237,7 +250,11 @@ export function startAgent({
         nodeId,
         maxContexts,
         version: NODE_PROTOCOL_VERSION,
-        contexts: reports()
+        contexts: reports(),
+        // Left out when empty: a plain node's hello is what it always was.
+        ...(features.length > 0 ? { features } : {}),
+        ...(labels.length > 0 ? { labels } : {}),
+        ...(exclusive ? { exclusive } : {})
       })
     })
     socket.addEventListener('message', (event) => onControlMessage(event.data))
@@ -324,22 +341,38 @@ export function startAgent({
     slotId,
     runId,
     tokenHash,
-    maxLifetimeSeconds
+    maxLifetimeSeconds,
+    options
   }: Extract<RelayToNode, { t: 'context.create' }>) {
     if (draining) return sendControl({ t: 'context.failed', reqId, message: 'This node is draining' })
     if (contexts.size + reserved >= maxContexts) {
       return sendControl({ t: 'context.failed', reqId, message: 'This node is full' })
     }
+    // What the slot asked for is checked again here (a timezone becomes an environment variable, a proxy a listener), and a node
+    // that cannot do all of it says so: a slot made without its proxy would go out from this node's own address.
+    const asked = parseNodeSlotOptions(options)
+    if (!asked.ok) return sendControl({ t: 'context.failed', reqId, message: asked.message, refused: true })
+    const missing = featuresFor(asked.value).filter((feature) => !features.includes(feature))
+    if (missing.length > 0) {
+      return sendControl({
+        t: 'context.failed',
+        reqId,
+        message: `This node does not offer: ${missing.join(', ')}`,
+        refused: true
+      })
+    }
     reserved++
     try {
-      await scope.createRun(slotId)
+      await scope.createRun(slotId, Object.keys(asked.value).length > 0 ? asked.value : undefined)
       const timer = setTimeout(() => void releaseContext(slotId, 'maximum lifetime reached'), maxLifetimeSeconds * 1000)
       timer.unref?.()
       contexts.set(slotId, { slotId, runId, tokenHash, createdAt: new Date().toISOString(), timer })
       sendControl({ t: 'context.created', reqId })
     } catch (error) {
       log('warn', 'Could not create a context', { slotId, error: String(error) })
-      sendControl({ t: 'context.failed', reqId, message: 'The browser could not create a context' })
+      if (error instanceof SlotRefusedError)
+        sendControl({ t: 'context.failed', reqId, message: error.message, refused: true })
+      else sendControl({ t: 'context.failed', reqId, message: 'The browser could not create a context' })
     } finally {
       reserved--
       notifyIdle()

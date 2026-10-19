@@ -83,6 +83,12 @@
         "minReadySeconds": { "$ref": "#/definitions/count" },
         "sandbox": { "type": "boolean" },
         "headless": { "enum": [true, false, "true", "false", "xvfb"] },
+        "labels": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,63}$" }
+        },
+        "exclusive": { "type": "boolean" },
         "resources": { "type": "object" },
         "tmpVolume": {
           "type": "object",

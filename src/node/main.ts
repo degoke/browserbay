@@ -20,6 +20,10 @@
  *                                            a virtual display the node starts (the image's default; needs Xvfb, and
  *                                            drops the HeadlessChrome user agent). 'false': a headful browser on the
  *                                            display the environment names (DISPLAY)
+ *   BROWSERBAY_NODE_LABELS                   comma-separated names for this node (`residential,eu`): a slot can ask for them with
+ *                                            `nodeLabels`, and only a node that has them all gets it
+ *   BROWSERBAY_NODE_EXCLUSIVE                'true': only slots that ask for one of this node's labels are placed on it, so
+ *                                            ordinary slots do not fill (say) a machine on a home connection
  *   BROWSERBAY_WEBDRIVER_FLAG                'hide' (default) turns navigator.webdriver off, which driving a browser over
  *                                            DevTools would otherwise turn on; 'keep' leaves it on
  *   BROWSERBAY_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory); with
@@ -32,7 +36,7 @@
  */
 import { hostname } from 'node:os'
 import { errorMessage } from '../errors.js'
-import { NODE_LIMITS } from '../protocol.js'
+import { LABEL_LIMITS, NAME_PATTERN, NODE_LIMITS } from '../protocol.js'
 import type { AgentLogger } from './agent.js'
 import { ConfigError, startBrowserNode, type BrowserNode, type Isolation } from './browser-node.js'
 import type { Display } from './chromium.js'
@@ -44,6 +48,8 @@ export interface NodeSettings {
   profileDir: string | undefined
   display: Display
   hideWebdriver: boolean
+  labels: string[]
+  exclusive: boolean
   sandbox: boolean
   isolation: Isolation
 }
@@ -82,6 +88,27 @@ export function parseNodeSettings(env: NodeJS.ProcessEnv = process.env): NodeSet
   const webdriver = (env.BROWSERBAY_WEBDRIVER_FLAG ?? '').trim().toLowerCase() || 'hide'
   if (webdriver !== 'hide' && webdriver !== 'keep')
     throw new Error('BROWSERBAY_WEBDRIVER_FLAG must be "hide" or "keep".')
+  // Empty or blank is "not set", as everywhere else; the relay would drop a label it cannot use, so refuse it here.
+  const labels = (env.BROWSERBAY_NODE_LABELS ?? '')
+    .split(',')
+    .map((label) => label.trim())
+    .filter(Boolean)
+  if (labels.length > LABEL_LIMITS.maxPerNode) {
+    throw new Error(`BROWSERBAY_NODE_LABELS may name at most ${LABEL_LIMITS.maxPerNode} labels.`)
+  }
+  for (const label of labels) {
+    if (label.length > LABEL_LIMITS.maxLength || !NAME_PATTERN.test(label)) {
+      throw new Error(
+        `BROWSERBAY_NODE_LABELS: a label may only contain letters, digits, "_", "." and "-" (up to ${LABEL_LIMITS.maxLength} characters).`
+      )
+    }
+  }
+  const exclusive = env.BROWSERBAY_NODE_EXCLUSIVE === 'true'
+  if (exclusive && labels.length === 0) {
+    throw new Error(
+      'BROWSERBAY_NODE_EXCLUSIVE needs BROWSERBAY_NODE_LABELS: a node with no label could never be asked for.'
+    )
+  }
   return {
     nodeId,
     maxContexts,
@@ -90,6 +117,8 @@ export function parseNodeSettings(env: NodeJS.ProcessEnv = process.env): NodeSet
     profileDir: env.BROWSERBAY_PROFILE_DIR || undefined,
     display,
     hideWebdriver: webdriver === 'hide',
+    labels: [...new Set(labels)],
+    exclusive,
     sandbox: env.BROWSERBAY_CHROMIUM_SANDBOX === 'true'
   }
 }

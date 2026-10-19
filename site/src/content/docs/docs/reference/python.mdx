@@ -66,7 +66,8 @@ Playwright is not a dependency of this package: install it yourself.
 box = BrowserBay(url, api_key, namespace=None, allow_other_boxes=None, logger=None,
                  timeout=15.0, lookup_timeout=3.0, release_timeout=10.0, retry_delay=0.3)
 
-box.acquire(run_id, max_lifetime_seconds, wait_ms=30000)  # -> Slot
+box.acquire(run_id, max_lifetime_seconds, wait_ms=30000,
+            proxy=None, timezone=None, locale=None, node_labels=None)  # -> Slot
 box.slot(stored)                     # a Slot from what you saved earlier; makes no request
 box.release(slot_id, url=None)       # releases a slot you only know the id of
 box.list()                           # -> [SlotSummary]
@@ -84,6 +85,18 @@ slot.to_dict()    # what to save to come back to this browser later
 ## Errors
 
 Every failure of the box or the network is a `BrowserBayError`. Its `status` is the HTTP status, or `None` when the box could not be reached. A full box is a `NoCapacityError`, a subclass with status 503.
+
+`acquire` takes four options after `wait_ms`, by keyword: `proxy` (a `Proxy`, or a dict with `server`, and optionally `username`, `password` and `bypass`), `timezone`, `locale` and `node_labels`. `Proxy`'s `repr` hides the password. When a box cannot give what was asked for, `acquire` raises `UnsupportedError`: no node can (status 422), or the box is older than the options and would have made a plain browser, which is released before the error is raised.
+
+```python
+from browserbay import Proxy
+
+slot = box.acquire(
+    run_id="task-42", max_lifetime_seconds=1800,
+    proxy=Proxy("http://proxy.example.com:8080", username="user", password="secret"),
+    node_labels=["residential"],
+)
+```
 
 A key whose quota is used up is a `QuotaExceededError` (status 429, answered at once), and a key confined to another namespace is a `ForbiddenError` (403): make the client with the matching `namespace`. Both are subclasses too.
 

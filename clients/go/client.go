@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf16"
 )
@@ -128,7 +129,42 @@ type AcquireOptions struct {
 	// Wait is how long to wait for a free slot before giving up with [ErrNoCapacity], in whole milliseconds. The
 	// box caps it at its own maximum. Zero means [DefaultWait]; [NoWait] means do not wait.
 	Wait time.Duration
+	// Proxy sends the slot's traffic through a proxy. The credentials stay on the box's node, which reaches the proxy for
+	// the browser: the browser never holds them and a page cannot read them. Acquire fails with [ErrUnsupported] if no
+	// node of the box can do this.
+	Proxy *ProxyOptions
+	// Timezone is the IANA time zone the slot's browser runs in, such as "Europe/Berlin". Only a box whose nodes run
+	// BROWSERBAY_ISOLATION=process can give it.
+	Timezone string
+	// Locale is the slot's browser language, such as "de-DE": its navigator.language and Accept-Language. Only a box whose
+	// nodes run BROWSERBAY_ISOLATION=process can give it.
+	Locale string
+	// NodeLabels places the slot only on a node that carries every one of these labels (BROWSERBAY_NODE_LABELS).
+	NodeLabels []string
 }
+
+// ProxyOptions is a proxy for one slot ([AcquireOptions.Proxy]).
+type ProxyOptions struct {
+	// Server is http://, https:// or socks5:// with host:port, and nothing else in it: no user name, password or path.
+	Server string
+	// Username and Password are the proxy's credentials. Empty means none.
+	Username string
+	Password string
+	// Bypass is Chromium's proxy bypass list: host patterns that go direct, separated by "," or ";".
+	Bypass string
+}
+
+// String hides the password, so a log line or a %v that shows a proxy does not leak it.
+func (p ProxyOptions) String() string {
+	hidden := ""
+	if p.Password != "" {
+		hidden = "***"
+	}
+	return fmt.Sprintf("ProxyOptions{Server: %q, Username: %q, Password: %q, Bypass: %q}", p.Server, p.Username, hidden, p.Bypass)
+}
+
+// GoString is String, so %#v does not show the password either.
+func (p ProxyOptions) GoString() string { return p.String() }
 
 // ReapOptions configures [Client.Reap].
 type ReapOptions struct {
@@ -159,6 +195,13 @@ type NodeSummary struct {
 	Contexts    int       `json:"contexts"`
 	Draining    bool      `json:"draining"`
 	LastSeenAt  time.Time `json:"lastSeenAt"`
+	// Features is what the node can do for a slot beyond giving it a browser ("proxy", "locale"). Empty for a box that
+	// predates them.
+	Features []string `json:"features,omitempty"`
+	// Labels is what the node's operator calls it: [AcquireOptions.NodeLabels] can ask for them.
+	Labels []string `json:"labels,omitempty"`
+	// Exclusive is true when the node only takes slots that ask for one of its labels.
+	Exclusive bool `json:"exclusive,omitempty"`
 }
 
 // Client talks to one box. Make it with [New].
@@ -378,8 +421,9 @@ func (c *Client) makeSlot(stored StoredSlot) (*Slot, error) {
 
 // Acquire takes a browser. It fails with [ErrNoCapacity] when the box stays full for the whole wait, with
 // [ErrQuotaExceeded] when the API key's quota is used up, with [ErrForbidden] when the key may not use this run id, with
-// [ErrInvalidArgument] (before sending anything) when an option is one the box would refuse, and with an *[Error]
-// for any other answer it cannot use.
+// [ErrUnsupported] when options were asked for and the box cannot give them (a browser made without them is released
+// first), with [ErrInvalidArgument] (before sending anything) when an option is one the box would refuse, and with an
+// *[Error] for any other answer it cannot use.
 func (c *Client) Acquire(ctx context.Context, opts AcquireOptions) (*Slot, error) {
 	fullRunID := c.prefix + opts.RunID
 	if opts.RunID == "" || len(utf16.Encode([]rune(fullRunID))) > MaxRunIDLength {
@@ -398,11 +442,41 @@ func (c *Client) Acquire(ctx context.Context, opts AcquireOptions) (*Slot, error
 	case wait%time.Millisecond != 0:
 		return nil, invalid("Wait must be a whole number of milliseconds")
 	}
-	body, err := json.Marshal(struct {
-		RunID              string `json:"runId"`
-		MaxLifetimeSeconds int64  `json:"maxLifetimeSeconds"`
-		WaitMilliseconds   int64  `json:"waitMs"`
-	}{fullRunID, int64(opts.MaxLifetime / time.Second), int64(wait / time.Millisecond)})
+	if opts.Proxy != nil && opts.Proxy.Server == "" {
+		return nil, invalid("Proxy.Server is required, such as http://proxy.example.com:8080")
+	}
+	// Only what is asked for is sent, so a request without options is the one a box has always taken.
+	type wireProxy struct {
+		Server   string `json:"server"`
+		Username string `json:"username,omitempty"`
+		Password string `json:"password,omitempty"`
+		Bypass   string `json:"bypass,omitempty"`
+	}
+	request := struct {
+		RunID              string     `json:"runId"`
+		MaxLifetimeSeconds int64      `json:"maxLifetimeSeconds"`
+		WaitMilliseconds   int64      `json:"waitMs"`
+		Proxy              *wireProxy `json:"proxy,omitempty"`
+		Timezone           string     `json:"timezone,omitempty"`
+		Locale             string     `json:"locale,omitempty"`
+		NodeLabels         []string   `json:"nodeLabels,omitempty"`
+	}{RunID: fullRunID, MaxLifetimeSeconds: int64(opts.MaxLifetime / time.Second),
+		WaitMilliseconds: int64(wait / time.Millisecond), Timezone: opts.Timezone, Locale: opts.Locale, NodeLabels: opts.NodeLabels}
+	var asked []string
+	if p := opts.Proxy; p != nil {
+		request.Proxy = &wireProxy{Server: p.Server, Username: p.Username, Password: p.Password, Bypass: p.Bypass}
+		asked = append(asked, "proxy")
+	}
+	if opts.Timezone != "" {
+		asked = append(asked, "timezone")
+	}
+	if opts.Locale != "" {
+		asked = append(asked, "locale")
+	}
+	if len(opts.NodeLabels) > 0 {
+		asked = append(asked, "nodeLabels")
+	}
+	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
@@ -421,17 +495,48 @@ func (c *Client) Acquire(ctx context.Context, opts AcquireOptions) (*Slot, error
 	if status == http.StatusTooManyRequests {
 		return nil, quotaExceeded()
 	}
+	if status == http.StatusUnprocessableEntity || status == http.StatusBadRequest {
+		// The box says what is wrong with what was asked for. It never repeats a credential, so the text is safe to show.
+		var said struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(data, &said)
+		detail := ""
+		if said.Message != "" {
+			detail = ": " + said.Message
+		}
+		if status == http.StatusUnprocessableEntity {
+			return nil, unsupported(status, "the box cannot give this browser%s", detail)
+		}
+		e := errorFrom(status, data, "the browser service refused the request (400)%s", detail)
+		return nil, e
+	}
 	if status < 200 || status > 299 {
 		return nil, errorFrom(status, data, "the browser service could not start a browser (%d)", status)
 	}
 	var created struct {
-		SlotID string `json:"slotId"`
-		Token  string `json:"token"`
-		NodeID string `json:"nodeId"`
+		SlotID  string   `json:"slotId"`
+		Token   string   `json:"token"`
+		NodeID  string   `json:"nodeId"`
+		Applied []string `json:"applied"`
 	}
 	_ = json.Unmarshal(data, &created)
 	if created.SlotID == "" || created.Token == "" || created.NodeID == "" {
 		return nil, newError(status, "", "the browser service returned an incomplete slot")
+	}
+	// A box older than these options answers 201 and ignores what it does not know: the browser it made is a plain one.
+	var missing []string
+	for _, name := range asked {
+		if !contains(created.Applied, name) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		if err := c.deleteSlot(ctx, c.boxURL, created.SlotID); err != nil {
+			c.warn("Could not release a browser made without the options asked for", created.SlotID, err)
+		}
+		return nil, unsupported(0, "the box did not apply %s: it is older than these options. Upgrade the box (its relay and nodes)",
+			strings.Join(missing, ", "))
 	}
 	return c.makeSlot(StoredSlot{URL: c.boxURL, SlotID: created.SlotID, Token: created.Token, NodeID: created.NodeID})
 }
@@ -525,11 +630,14 @@ func (c *Client) Nodes(ctx context.Context) ([]NodeSummary, error) {
 	nodes := make([]NodeSummary, 0, len(body.Nodes))
 	for _, raw := range body.Nodes {
 		var wire struct {
-			NodeID      string `json:"nodeId"`
-			MaxContexts int    `json:"maxContexts"`
-			Contexts    int    `json:"contexts"`
-			Draining    bool   `json:"draining"`
-			LastSeenAt  string `json:"lastSeenAt"`
+			NodeID      string   `json:"nodeId"`
+			MaxContexts int      `json:"maxContexts"`
+			Contexts    int      `json:"contexts"`
+			Draining    bool     `json:"draining"`
+			LastSeenAt  string   `json:"lastSeenAt"`
+			Features    []string `json:"features"`
+			Labels      []string `json:"labels"`
+			Exclusive   bool     `json:"exclusive"`
 		}
 		if json.Unmarshal(raw, &wire) != nil || wire.NodeID == "" {
 			continue
@@ -537,6 +645,7 @@ func (c *Client) Nodes(ctx context.Context) ([]NodeSummary, error) {
 		nodes = append(nodes, NodeSummary{
 			NodeID: wire.NodeID, MaxContexts: wire.MaxContexts, Contexts: wire.Contexts,
 			Draining: wire.Draining, LastSeenAt: parseTime(wire.LastSeenAt),
+			Features: wire.Features, Labels: wire.Labels, Exclusive: wire.Exclusive,
 		})
 	}
 	return nodes, nil
@@ -591,6 +700,15 @@ func (c *Client) Reap(ctx context.Context, opts ReapOptions) (int, error) {
 		released++
 	}
 	return released, nil
+}
+
+func contains(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) warn(message, slotID string, err error) {

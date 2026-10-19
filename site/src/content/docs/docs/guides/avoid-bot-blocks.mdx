@@ -43,6 +43,104 @@ node scripts/smoke-box.mjs https://browsers.example.com "$BROWSERBAY_API_KEY"
 
 Pass `--headless` for a node you run headless on purpose. CI runs it against the image it builds.
 
+## Send a slot's traffic through a proxy
+
+A datacenter address is the most common reason a good-looking browser is blocked. Give a slot a proxy, and its traffic leaves from the proxy's address.
+
+<Tabs>
+  <TabItem label="Node">
+
+```js
+const slot = await box.acquire({
+  runId: 'task-42',
+  maxLifetimeSeconds: 1800,
+  proxy: { server: 'http://proxy.example.com:8080', username: 'user', password: process.env.PROXY_PASSWORD }
+})
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from browserbay import Proxy
+
+slot = box.acquire(
+    run_id="task-42", max_lifetime_seconds=1800,
+    proxy=Proxy("http://proxy.example.com:8080", username="user", password=os.environ["PROXY_PASSWORD"]),
+)
+```
+
+  </TabItem>
+  <TabItem label="Go">
+
+```go
+slot, err := box.Acquire(ctx, browserbay.AcquireOptions{
+    RunID: "task-42", MaxLifetime: 30 * time.Minute,
+    Proxy: &browserbay.ProxyOptions{Server: "http://proxy.example.com:8080", Username: "user", Password: os.Getenv("PROXY_PASSWORD")},
+})
+```
+
+  </TabItem>
+</Tabs>
+
+`server` is `http://`, `https://` or `socks5://` with `host:port`. `bypass` takes Chromium's list of hosts that go direct. Many proxy providers pick a sticky exit address from the user name, so one slot keeps one address.
+
+**How it works.** Chromium takes a proxy per browser context, but no credentials for it over DevTools, and it speaks no SOCKS5 sign-in. So the node does not give Chromium your proxy. It starts a small forwarder for the slot, on its own loopback, and gives Chromium that. The forwarder opens each connection to your proxy itself and adds the credentials there.
+
+- **The browser never holds the credentials,** so a page cannot read them, and a proxy that refuses them is a page that fails to load, not a login prompt.
+- **Where the password goes.** From your service to the relay (over TLS, if you serve it over HTTPS) to the one node that makes the browser, and into memory there for the life of the slot. The relay keeps it in no table and logs nothing of it. See [Trust and isolation](/docs/security/trust/#proxy-credentials).
+- **A proxy at loopback, `169.254.169.254` or any other address of the node itself is refused,** however it is spelled, and so is a name that resolves to one. A slot's proxy must be somewhere a slot may go. (Addresses on your own private network are fine.)
+- **Loopback is not exempt.** A slot on a proxy sends requests for `localhost` through the proxy too, so its pages cannot reach the node's own services.
+- **A context your client makes** (`browser.newContext()`, on a node with `BROWSERBAY_ISOLATION=process`) uses the slot's proxy unless you name another by IP address (a host name is refused: it could point at the node itself).
+
+<Aside type="caution" title="Use process isolation for proxied slots">
+  WebRTC can send UDP past a proxy, to a STUN server, and tell a page the node's real address. A node with a Chromium
+  per slot (`BROWSERBAY_ISOLATION=process`) starts a proxied slot's browser with a WebRTC policy that stops it. One
+  shared Chromium cannot set that per slot, so on a shared node a proxied slot can still leak its node's address through
+  WebRTC.
+</Aside>
+
+Plain `http://` pages go through a SOCKS tunnel as `CONNECT` to port 80, which an HTTP proxy must allow. A proxy on a private address needs `extraEgress` if you use the Helm chart's `node.networkPolicy`.
+
+## Run a node on a home or office connection
+
+The strongest address is one that is not a datacenter's. A node only ever dials **out** to the relay, so it can run on a machine behind a home router with no open port: your office desktop, a mini PC, a Raspberry Pi. Run one there, and ask for it.
+
+```sh
+# on the home machine
+docker run -d --name browserbay-node --restart always --init \
+  -e BROWSERBAY_RELAY_URL=https://browsers.example.com \
+  -e BROWSERBAY_ENROLLMENT_SECRET=... \
+  -e BROWSERBAY_NODE_ID=home-1 \
+  -e BROWSERBAY_NODE_LABELS=residential \
+  -e BROWSERBAY_NODE_EXCLUSIVE=true \
+  ghcr.io/degoke/browserbay node
+```
+
+```js
+const slot = await box.acquire({ runId: 'task-42', maxLifetimeSeconds: 1800, nodeLabels: ['residential'] })
+```
+
+- **`BROWSERBAY_NODE_LABELS`** names the node. A slot that asks for `nodeLabels` is only placed on a node with all of them.
+- **`BROWSERBAY_NODE_EXCLUSIVE=true`** keeps the node for those slots. Without it, the box's ordinary slots fill it too.
+- **No such node is a quick `422`,** not a long wait: `UnsupportedError` says no node carries the label. (Just after the relay restarts it waits as usual for nodes that are reconnecting.)
+- **Mind what the machine can reach.** A slot can browse your home or office network ([Trust and isolation](/docs/security/trust/)). Run it on a machine, VLAN or network with nothing you mind a page reaching.
+
+## Set a time zone and language
+
+A browser in Berlin that reports UTC and `en-US` is a tell. A node running `BROWSERBAY_ISOLATION=process` can give each slot its own:
+
+```js
+const slot = await box.acquire({
+  runId: 'task-42',
+  maxLifetimeSeconds: 1800,
+  timezone: 'Europe/Berlin',
+  locale: 'de-DE'
+})
+```
+
+The slot's `navigator.language`, `navigator.languages`, `Accept-Language` header and `Intl` time zone then say `de-DE` and `Europe/Berlin`. Match them to the proxy's country. A box whose nodes share one Chromium cannot do this per slot, and `acquire` throws `UnsupportedError` at once rather than make a slot in the wrong zone.
+
 ## What is left, and what to do about it
 
 <Aside type="note" title="The address matters most">
@@ -51,6 +149,6 @@ Pass `--headless` for a node you run headless on purpose. CI runs it against the
 </Aside>
 
 - **WebGL reports a software renderer.** The image has no GPU, so a page reading the WebGL renderer sees SwiftShader. A node on a machine with a GPU does not.
-- **The time zone is UTC** unless the node's environment says otherwise (`TZ`).
+- **The time zone is UTC** unless you set one: [`timezone` and `locale`](#set-a-time-zone-and-language) on a node with a Chromium per slot, or `TZ` for a whole node.
 - **Behaviour.** A script that clicks at machine speed, never moves the mouse and loads fifty pages a second looks like a bot whatever the browser says.
 - **CAPTCHAs.** A CAPTCHA is a site asking for a person. browserbay does not solve them. A person can: see [Live view](/docs/guides/live-view/) and [Hand off and clean up](/docs/guides/hand-off/).

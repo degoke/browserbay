@@ -18,8 +18,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { errorMessage } from '../errors.js'
-import { chromiumArgs, chromiumEnv, type Display } from './chromium.js'
+import type { SlotOptions } from '../protocol.js'
+import { parseNodeSlotOptions, SlotRefusedError } from '../slot-options.js'
+import { chromiumArgs, chromiumEnv, slotBrowser, type Display } from './chromium.js'
 import { createPipeUpstream } from './pipe-upstream.js'
+import { runContext, startProxyForwarder, type ProxyForwarder, type ProxyForwarderOptions } from './proxy-forwarder.js'
 import { createCdpScope, type CdpScope, type RunHost, type ScopeLogger } from './scope.js'
 import { startXvfb, type Xvfb, type XvfbOptions } from './xvfb.js'
 
@@ -63,6 +66,8 @@ export interface ProcessHostOptions {
   spawnChromium?: typeof spawn
   /** For tests: how Xvfb is found and started. */
   xvfb?: XvfbOptions
+  /** For tests: how a slot's proxy forwarder is started and what it may connect to. */
+  forwarder?: ProxyForwarderOptions & { start?: typeof startProxyForwarder }
 }
 
 export interface ProcessHost extends Omit<RunHost, 'onRunEnded'> {
@@ -78,6 +83,8 @@ interface Slot {
   scope: CdpScope
   /** The slot's own virtual display, when the node runs on `xvfb`. */
   xvfb?: Xvfb
+  /** The slot's proxy, as the browser reaches it, when the slot asked for one. */
+  forwarder?: ProxyForwarder
   profileDir: string
   /** Set once the browser answered and its context exists: only then is it a slot the node reports, and can lose. */
   ready: boolean
@@ -116,23 +123,33 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
   const removeProfile = (dir: string) =>
     rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }).catch(() => undefined)
 
-  async function createRun(runKey: string) {
+  /** Where the zone database is, when this system has one: a TZ that is not a file in it would silently be UTC. */
+  const ZONEINFO = '/usr/share/zoneinfo'
+
+  async function createRun(runKey: string, requested?: SlotOptions) {
     if (!SLOT_KEY.test(runKey)) throw new Error('Not a valid slot id')
     if (slots.has(runKey) || creating.has(runKey)) throw new Error('This slot already has a browser')
+    const asked = parseNodeSlotOptions(requested)
+    if (!asked.ok) throw new SlotRefusedError(asked.message)
+    if (asked.value.timezone && existsSync(ZONEINFO) && !existsSync(join(ZONEINFO, asked.value.timezone))) {
+      throw new SlotRefusedError('This node does not have that time zone')
+    }
     creating.add(runKey)
     try {
-      return await startSlot(runKey)
+      return await startSlot(runKey, asked.value)
     } finally {
       creating.delete(runKey)
     }
   }
 
-  async function startSlot(runKey: string) {
+  async function startSlot(runKey: string, requested: SlotOptions) {
     const profileDir = await makeProfileDir(runKey)
     const began = Date.now()
     let xvfb: Xvfb | undefined
+    let forwarder: ProxyForwarder | undefined
     /** What exists before the browser does, ended when the browser cannot be made. */
     const undo = async () => {
+      await forwarder?.close()
       await xvfb?.close()
       await removeProfile(profileDir)
     }
@@ -144,12 +161,25 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
           startTimeoutMs: Math.min(options.xvfb?.startTimeoutMs ?? 8000, startTimeoutMs)
         })
       }
-      // DevTools over a pipe (fds 3 and 4): no port, and no size limit on a screenshot or an evaluate result.
-      child = spawnChromium(executable, chromiumArgs({ profileDir, display, sandbox, hideWebdriver }), {
-        stdio: ['ignore', 'ignore', 'inherit', 'pipe', 'pipe'],
-        // Not the node's own environment: it holds this box's secrets, and pages the browser runs are not trusted with them.
-        env: chromiumEnv(process.env, xvfb?.env)
+      if (requested.proxy) {
+        const { start = startProxyForwarder, ...forwarderOptions } = options.forwarder ?? {}
+        forwarder = await start(requested.proxy, { logger, ...forwarderOptions })
+      }
+      const browser = slotBrowser({
+        proxied: Boolean(requested.proxy),
+        timezone: requested.timezone,
+        locale: requested.locale
       })
+      // DevTools over a pipe (fds 3 and 4): no port, and no size limit on a screenshot or an evaluate result.
+      child = spawnChromium(
+        executable,
+        chromiumArgs({ profileDir, display, sandbox, hideWebdriver, extraArgs: browser.args }),
+        {
+          stdio: ['ignore', 'ignore', 'inherit', 'pipe', 'pipe'],
+          // Not the node's own environment: it holds this box's secrets, and pages the browser runs are not trusted with them.
+          env: chromiumEnv(process.env, { ...xvfb?.env, ...browser.env })
+        }
+      )
     } catch (error) {
       await undo()
       throw error
@@ -158,7 +188,7 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
     const scope = createCdpScope({ upstream: { send: (text) => pipe?.send(text) }, logger, dedicated: true })
     let markExited: () => void = () => undefined
     const exited = new Promise<void>((resolve) => (markExited = resolve))
-    const slot: Slot = { child, scope, xvfb, profileDir, ready: false, stopping: false, exited }
+    const slot: Slot = { child, scope, xvfb, forwarder, profileDir, ready: false, stopping: false, exited }
     slots.set(runKey, slot)
 
     const gone = (reason: string) => {
@@ -199,7 +229,7 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
     let timer: NodeJS.Timeout | undefined
     try {
       await Promise.race([
-        scope.start().then(() => scope.createRun(runKey)),
+        scope.start().then(() => scope.createRun(runKey, runContext(forwarder, requested.proxy))),
         new Promise<never>((_, reject) => {
           // Starting the display took part of the time the relay gives a slot.
           const left = Math.max(1000, startTimeoutMs - (Date.now() - began))
@@ -231,6 +261,7 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
       await slot.exited
       clearTimeout(hard)
     }
+    await slot.forwarder?.close()
     await slot.xvfb?.close()
     await removeProfile(slot.profileDir)
   }

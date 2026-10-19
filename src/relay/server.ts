@@ -9,9 +9,19 @@ import {
   createNodeRegistry,
   hashToken,
   NoCapacityError,
+  UnsupportedError,
   type NodeLink,
   type NodeRegistry
 } from './registry.js'
+import {
+  appliedNames,
+  featuresFor,
+  parseNodeLabels,
+  parseSlotOptions,
+  REQUEST_FIELDS,
+  sanitizeFeatures,
+  sanitizeLabels
+} from '../slot-options.js'
 import {
   CLOSE,
   NODE_LIMITS,
@@ -74,6 +84,8 @@ export interface RelayOptions {
   maxBufferedBytes?: number
   slowConsumerGraceMs?: number
   createTimeoutMs?: number
+  /** After the relay starts, a request no connected node could serve waits like any other (see the registry). Default 15 s. */
+  unsupportedGraceMs?: number
   sweepMs?: number
   logger?: RelayLogger
   now?: () => number
@@ -102,7 +114,8 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(text)
 }
 
-const fail = (res: ServerResponse, status: number, error: RelayErrorResponse['error']) => json(res, status, { error })
+const fail = (res: ServerResponse, status: number, error: RelayErrorResponse['error'], message?: string) =>
+  json(res, status, message === undefined ? { error } : ({ error, message } satisfies RelayErrorResponse))
 
 function rejectUpgrade(socket: Duplex, status: number, text: string) {
   socket.write(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
@@ -158,6 +171,7 @@ export function createRelayServer(options: RelayOptions) {
     now: options.now,
     nodeTimeoutMs: options.nodeTimeoutMs,
     createTimeoutMs: options.createTimeoutMs,
+    unsupportedGraceMs: options.unsupportedGraceMs,
     onCreateFailed(nodeId, error) {
       logger.warn?.('A node could not create a context', { nodeId, error: String(error) })
     },
@@ -250,6 +264,14 @@ export function createRelayServer(options: RelayOptions) {
     } catch {
       return fail(res, 400, 'invalid_request')
     }
+    // A field this relay does not know is refused, not skipped: a relay older than an option would otherwise answer 201 for a
+    // slot that lacks it (one asked to use a proxy, going out direct). The body is checked as a whole before anything else.
+    const isObject = typeof body === 'object' && body !== null && !Array.isArray(body)
+    const known = new Set<string>(REQUEST_FIELDS)
+    const unknownField = isObject ? Object.keys(body!).find((name) => !known.has(name)) : undefined
+    if (unknownField !== undefined) {
+      return fail(res, 400, 'invalid_request', `Unknown field ${JSON.stringify(unknownField.slice(0, 40))}`)
+    }
     const { runId, maxLifetimeSeconds, waitMs } = body ?? {}
     const valid =
       typeof runId === 'string' &&
@@ -260,6 +282,15 @@ export function createRelayServer(options: RelayOptions) {
       maxLifetimeSeconds! <= SLOT_LIMITS.maxLifetimeSeconds &&
       (waitMs === undefined || (Number.isInteger(waitMs) && waitMs >= 0))
     if (!valid) return fail(res, 400, 'invalid_request')
+    const parsedOptions = parseSlotOptions(body as Record<string, unknown>)
+    if (!parsedOptions.ok) return fail(res, 400, 'invalid_request', parsedOptions.message)
+    const parsedLabels =
+      body!.nodeLabels === undefined
+        ? ({ ok: true, value: [] as string[] } as const)
+        : parseNodeLabels(body!.nodeLabels)
+    if (!parsedLabels.ok) return fail(res, 400, 'invalid_request', parsedLabels.message)
+    const slotOptions = parsedOptions.value
+    const nodeLabels = parsedLabels.value
     if (!inNamespace(key, runId)) return fail(res, 403, 'forbidden')
 
     // The count and the claim are one synchronous step, so concurrent requests cannot both squeeze under the quota.
@@ -279,13 +310,21 @@ export function createRelayServer(options: RelayOptions) {
         runId,
         maxLifetimeSeconds: maxLifetimeSeconds!,
         waitMs: Math.min(waitMs ?? 0, maxAcquireWaitMs),
-        signal: abandoned.signal
+        signal: abandoned.signal,
+        need: {
+          features: [...featuresFor(slotOptions)],
+          labels: nodeLabels
+        },
+        options: slotOptions
       })
-      logger.info?.('Slot created', { slotId: slot.slotId, runId, nodeId: slot.nodeId, key: key.id })
-      return json(res, 201, slot satisfies CreateSlotResponse)
+      // Which options the slot has, never what they are: a proxy's password is not for a log.
+      const applied = appliedNames(slotOptions, nodeLabels)
+      logger.info?.('Slot created', { slotId: slot.slotId, runId, nodeId: slot.nodeId, key: key.id, applied })
+      return json(res, 201, { ...slot, applied } satisfies CreateSlotResponse)
     } catch (error) {
       if (error instanceof AllocationAbortedError) return
       if (error instanceof NoCapacityError) return fail(res, 503, 'no_capacity')
+      if (error instanceof UnsupportedError) return fail(res, 422, 'unsupported', error.message)
       throw error
     } finally {
       if (namespace) {
@@ -371,7 +410,10 @@ export function createRelayServer(options: RelayOptions) {
           id: nodeId,
           maxContexts: message.maxContexts,
           link,
-          contexts: sanitizeContexts(message.contexts)
+          contexts: sanitizeContexts(message.contexts),
+          features: sanitizeFeatures(message.features),
+          labels: sanitizeLabels(message.labels),
+          exclusive: message.exclusive === true
         })
         logger.info?.('Node connected', { nodeId, enrollment: enrollment.id, contexts: message.contexts?.length ?? 0 })
         link.send({ t: 'welcome', heartbeatMs, version: NODE_PROTOCOL_VERSION })
@@ -390,7 +432,12 @@ export function createRelayServer(options: RelayOptions) {
         case 'context.created':
           return registry.answerCreate(nodeId, String(message.reqId))
         case 'context.failed':
-          return registry.answerCreate(nodeId, String(message.reqId), String(message.message ?? 'failed'))
+          return registry.answerCreate(
+            nodeId,
+            String(message.reqId),
+            String(message.message ?? 'failed'),
+            message.refused === true
+          )
         case 'context.ended':
           return void registry.endFromNode(
             nodeId,

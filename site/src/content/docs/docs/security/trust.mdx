@@ -18,6 +18,17 @@ Tested against real Chromium (`test/scope.browser.test.ts` in the repository):
 - **A client is held to the web.** It cannot point a page at `file:`, `chrome:`, `devtools:`, `view-source:` or `about:` pages other than blank. Only `http(s)`, `data:` and `blob:` open. It cannot have the browser read a file path into a page (`DOM.setFileInputFiles`, dragging files in), and it cannot choose where a download goes. Downloads are denied from the start.
 - **The browser does not inherit the node's secrets.** Chromium is started with an allowlisted environment, not the node's: `PATH`, `HOME`, the locale (`LANG`, `LC_*`), `TZ`, the display (`DISPLAY`, `XAUTHORITY`, `WAYLAND_DISPLAY`, `XDG_*`), library and font paths, and proxy and CA settings (`HTTP(S)_PROXY`, `NO_PROXY`, `SSL_CERT_*`). A headful node that needs more (`LIBGL_*`, `MESA_*`, `GTK_*`, `DBUS_SESSION_BUS_ADDRESS`) names it in `BROWSERBAY_CHROMIUM_ENV_PASSTHROUGH`. The box's own `BROWSERBAY_*` settings can never be passed.
 
+## Proxy credentials
+
+A slot can be given a proxy with a user name and password ([Avoid bot blocks](/docs/guides/avoid-bot-blocks/#send-a-slots-traffic-through-a-proxy)). The password is handled like this:
+
+- It travels from your service to the relay in the request, then to the one node that makes the browser, in the frame that creates the slot. Both hops are as protected as their connections: TLS, except between a relay and a node on loopback or, with `BROWSERBAY_ALLOW_INSECURE_RELAY`, a private network.
+- The relay keeps it in no table, no listing and no log (the log says which options a slot has, never what they are). It exists in the relay's memory only while the request is being served.
+- The node keeps it in memory for the life of the slot, in the slot's forwarder. **Chromium never holds it:** the browser is told to use a loopback address of the node's, and the forwarder adds the credentials when it connects to your proxy. A page cannot read them, and a client of the slot cannot ask the browser for them.
+- A message that says an option is wrong never repeats it, and the Python and Go clients print a proxy with its password hidden.
+
+What it cannot do: a client with the slot token has control of the slot's browser, which goes out through the proxy. They can use the proxy as the slot does for as long as the slot lives. That is why the token is a credential too.
+
 ## What it does not do
 
 The box limits what a client can _ask_ of the machine. It does not make a client harmless.

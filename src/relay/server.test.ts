@@ -49,6 +49,11 @@ async function connectNode(
     serve?: boolean
     confirm?: boolean
     version?: number
+    features?: string[]
+    labels?: string[]
+    exclusive?: boolean
+    /** Answer every create with a refusal (`context.failed` with `refused`) that says this. */
+    refuse?: string
   } = {}
 ) {
   const {
@@ -58,7 +63,11 @@ async function connectNode(
     contexts = [],
     serve = true,
     confirm = true,
-    version = 1
+    version = 1,
+    features,
+    labels,
+    exclusive,
+    refuse
   } = options
   const control = new WebSocket(`${wsBase}${RELAY_PATHS.nodeConnect}`)
   const received: RelayToNode[] = []
@@ -71,7 +80,9 @@ async function connectNode(
     received.push(message)
     if (message.t === 'context.create') {
       held.set(message.slotId, message)
-      if (confirm) control.send(JSON.stringify({ t: 'context.created', reqId: message.reqId }))
+      if (refuse !== undefined) {
+        control.send(JSON.stringify({ t: 'context.failed', reqId: message.reqId, message: refuse, refused: true }))
+      } else if (confirm) control.send(JSON.stringify({ t: 'context.created', reqId: message.reqId }))
     }
     if (message.t === 'context.release') held.delete(message.slotId)
     if (message.t === 'stream.open' && serve) {
@@ -88,7 +99,19 @@ async function connectNode(
     control.once('open', () => resolve())
     control.once('error', reject)
   })
-  control.send(JSON.stringify({ t: 'hello', secret, nodeId, maxContexts, version, contexts }))
+  control.send(
+    JSON.stringify({
+      t: 'hello',
+      secret,
+      nodeId,
+      maxContexts,
+      version,
+      contexts,
+      ...(features ? { features } : {}),
+      ...(labels ? { labels } : {}),
+      ...(exclusive ? { exclusive } : {})
+    })
+  )
   return {
     control,
     received,
@@ -894,6 +917,217 @@ test('a node can say one of its contexts ended, and only its own: the relay drop
   } finally {
     one.close()
     two.close()
+    await relay.close()
+  }
+})
+
+// ---- slot options: what a slot asks of its browser ----------------------------------------------------------------
+
+const PROXY = {
+  server: 'http://proxy.example.com:8080',
+  username: 'user',
+  password: 'hunter2-proxy-password',
+  bypass: '*.internal.test'
+}
+
+test('a slot can ask for a proxy, a time zone, a language and a node: the node is told, the response says what it has, nothing is logged', async () => {
+  const lines: string[] = []
+  const { relay, base, wsBase } = await startRelay({
+    logger: {
+      info: (message, fields) => lines.push(JSON.stringify({ message, fields })),
+      warn: (m, f) => lines.push(JSON.stringify({ m, f }))
+    }
+  })
+  const node = await connectNode(wsBase, { features: ['proxy', 'locale'], labels: ['home', 'eu'] })
+  try {
+    await node.welcomed()
+    const response = await createSlot(base, {
+      runId: 'run-options',
+      maxLifetimeSeconds: 600,
+      proxy: PROXY,
+      timezone: 'europe/berlin',
+      locale: 'de-de',
+      nodeLabels: ['home']
+    })
+    assert.equal(response.status, 201)
+    const slot = (await response.json()) as { slotId: string; applied: string[] }
+    assert.deepEqual(slot.applied, ['proxy', 'timezone', 'locale', 'nodeLabels'])
+
+    const created = node.received.find((message) => message.t === 'context.create')
+    assert.ok(created && created.t === 'context.create')
+    assert.deepEqual(
+      created.options,
+      { proxy: PROXY, timezone: 'Europe/Berlin', locale: 'de-DE' },
+      'what the node acts on, checked and in the system’s spelling; the labels are the relay’s own business'
+    )
+    assert.ok(!('nodeLabels' in created) && !JSON.stringify(created.options).includes('nodeLabels'))
+
+    // The password is in the frame to the node and nowhere else: not in the registry, the listings or the logs.
+    const everywhere = [
+      JSON.stringify(relay.registry.listSlots()),
+      JSON.stringify(relay.registry.getSlot(slot.slotId)),
+      JSON.stringify(relay.registry.listNodes()),
+      lines.join('\n')
+    ].join('\n')
+    assert.ok(!everywhere.includes(PROXY.password), 'the relay does not keep or log a proxy password')
+  } finally {
+    node.close()
+    await relay.close()
+  }
+})
+
+test('a plain slot is as it always was: a frame without options, and nothing applied', async () => {
+  const { relay, base, wsBase } = await startRelay()
+  const node = await connectNode(wsBase, { features: ['proxy'] })
+  try {
+    await node.welcomed()
+    const response = await createSlot(base)
+    assert.equal(response.status, 201)
+    assert.deepEqual(((await response.json()) as { applied: string[] }).applied, [])
+    const created = node.received.find((message) => message.t === 'context.create')!
+    assert.ok(!('options' in created), 'an older node reads this frame as it always did')
+  } finally {
+    node.close()
+    await relay.close()
+  }
+})
+
+test('a request the relay cannot make sense of is a 400 that says what is wrong, and never repeats a password', async () => {
+  const { relay, base } = await startRelay()
+  try {
+    const base600 = { runId: 'r', maxLifetimeSeconds: 600 }
+    for (const [extra, expected] of [
+      [{ surprise: true }, /Unknown field "surprise"/],
+      [{ proxy: 'http://proxy.example.com:8080' }, /proxy must be an object/],
+      [{ proxy: { server: 'http://127.0.0.1:8080', password: PROXY.password, username: 'u' } }, /loopback/],
+      [{ proxy: { server: `http://u:${PROXY.password}@proxy.example.com:8080` } }, /proxy\.server must be/],
+      [{ proxy: { server: 'http://p.example.com:1', password: PROXY.password } }, /needs proxy\.username/],
+      [{ timezone: 'Mars/Olympus' }, /timezone/],
+      [{ locale: 'en_US' }, /locale/],
+      [{ nodeLabels: 'home' }, /list of labels/],
+      [{ nodeLabels: ['a b'] }, /label is letters/]
+    ] as const) {
+      const response = await createSlot(base, { ...base600, ...extra })
+      assert.equal(response.status, 400, JSON.stringify(extra))
+      const body = (await response.json()) as { error: string; message: string }
+      assert.equal(body.error, 'invalid_request')
+      assert.match(body.message, expected)
+      assert.ok(!body.message.includes(PROXY.password), 'the message does not repeat a password')
+    }
+    // The plain mistakes keep their plain answer.
+    assert.deepEqual(await (await createSlot(base, { runId: '', maxLifetimeSeconds: 600 })).json(), {
+      error: 'invalid_request'
+    })
+  } finally {
+    await relay.close()
+  }
+})
+
+test('a slot that no connected node could ever serve is 422 at once, and says why; with no node connected it waits as always', async () => {
+  const { relay, base, wsBase } = await startRelay({ unsupportedGraceMs: 0 })
+  try {
+    // Nobody is connected: that is "no capacity" (a node may be on its way), not "unsupported".
+    assert.equal((await createSlot(base, { runId: 'a', maxLifetimeSeconds: 600, proxy: PROXY })).status, 503)
+
+    const plain = await connectNode(wsBase, { nodeId: 'old' }) // a node that predates options: no features
+    await plain.welcomed()
+    const started = Date.now()
+    const proxy = await createSlot(base, { runId: 'b', maxLifetimeSeconds: 600, proxy: PROXY, waitMs: 5000 })
+    assert.equal(proxy.status, 422)
+    assert.ok(Date.now() - started < 1500, 'at once, not after the wait')
+    const body = (await proxy.json()) as { error: string; message: string }
+    assert.equal(body.error, 'unsupported')
+    assert.match(body.message, /No node offers proxy/)
+    assert.equal(
+      plain.received.filter((message) => message.t === 'context.create').length,
+      0,
+      'the old node was never asked to make a slot without its proxy'
+    )
+
+    const label = await createSlot(base, { runId: 'c', maxLifetimeSeconds: 600, nodeLabels: ['residential'] })
+    assert.equal(label.status, 422)
+    assert.match(((await label.json()) as { message: string }).message, /No node carries the label residential/)
+
+    // A plain slot is still served by that node.
+    assert.equal((await createSlot(base, { runId: 'd', maxLifetimeSeconds: 600 })).status, 201)
+    plain.close()
+  } finally {
+    await relay.close()
+  }
+})
+
+test('a node that is exclusive takes only the slots that ask for its label', async () => {
+  const { relay, base, wsBase } = await startRelay({ unsupportedGraceMs: 0 })
+  const home = await connectNode(wsBase, { nodeId: 'home', labels: ['home'], exclusive: true, features: ['proxy'] })
+  try {
+    await home.welcomed()
+    const plain = await createSlot(base, { runId: 'a', maxLifetimeSeconds: 600 })
+    assert.equal(plain.status, 422)
+    assert.match(
+      ((await plain.json()) as { message: string }).message,
+      /only takes slots that ask for one of its labels/
+    )
+
+    const asked = await createSlot(base, { runId: 'b', maxLifetimeSeconds: 600, nodeLabels: ['home'] })
+    assert.equal(asked.status, 201)
+    assert.equal(((await asked.json()) as { nodeId: string }).nodeId, 'home')
+
+    // Another node takes the ordinary slots, and the exclusive one is left to the asking.
+    const open = await connectNode(wsBase, { nodeId: 'open' })
+    await open.welcomed()
+    const ordinary = await createSlot(base, { runId: 'c', maxLifetimeSeconds: 600 })
+    assert.equal(((await ordinary.json()) as { nodeId: string }).nodeId, 'open')
+    open.close()
+  } finally {
+    home.close()
+    await relay.close()
+  }
+})
+
+test('the node list says what each node can do, what it is called and whether it is kept for its labels', async () => {
+  const { relay, base, wsBase } = await startRelay()
+  const node = await connectNode(wsBase, {
+    nodeId: 'labelled',
+    features: ['proxy', 'locale', 'bad feature', 5 as never],
+    labels: ['home', 'no good', 'eu'],
+    exclusive: true
+  })
+  const plain = await connectNode(wsBase, { nodeId: 'plain' })
+  try {
+    await node.welcomed()
+    await plain.welcomed()
+    const { nodes } = (await (await rest(base, RELAY_PATHS.nodes)).json()) as {
+      nodes: Array<{ nodeId: string; features: string[]; labels: string[]; exclusive: boolean }>
+    }
+    const labelled = nodes.find((entry) => entry.nodeId === 'labelled')!
+    assert.deepEqual(labelled.features, ['proxy', 'locale'], 'what is not a feature name is dropped')
+    assert.deepEqual(labelled.labels, ['home', 'eu'], 'and what is not a label')
+    assert.equal(labelled.exclusive, true)
+    const bare = nodes.find((entry) => entry.nodeId === 'plain')!
+    assert.deepEqual([bare.features, bare.labels, bare.exclusive], [[], [], false])
+  } finally {
+    node.close()
+    plain.close()
+    await relay.close()
+  }
+})
+
+test('a node that refuses a slot is a 422 at once, with its words quoted in the relay’s own sentence; a node that is only full is not', async () => {
+  const { relay, base, wsBase } = await startRelay({ unsupportedGraceMs: 0 })
+  const node = await connectNode(wsBase, { refuse: 'This node does not have that time zone' })
+  try {
+    await node.welcomed()
+    const started = Date.now()
+    const response = await createSlot(base, { runId: 'zone', maxLifetimeSeconds: 600, waitMs: 5000 })
+    assert.equal(response.status, 422)
+    assert.deepEqual(await response.json(), {
+      error: 'unsupported',
+      message: 'A node cannot make this slot as asked: "This node does not have that time zone"'
+    })
+    assert.ok(Date.now() - started < 2000, 'not after the wait')
+    assert.equal(relay.registry.listSlots().length, 0)
+  } finally {
+    node.close()
     await relay.close()
   }
 })

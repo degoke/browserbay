@@ -19,11 +19,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { errorMessage } from '../errors.js'
-import { ConfigError } from '../protocol.js'
+import { ConfigError, NODE_FEATURE } from '../protocol.js'
 import { assertSecureRelayUrl, startAgent, type Agent, type AgentLogger } from './agent.js'
 import { chromiumArgs, chromiumEnv, findChromium, type Display } from './chromium.js'
 import { createPipeUpstream } from './pipe-upstream.js'
 import { createProcessHost, removeStaleProfiles, type ProcessHost } from './process-host.js'
+import { createScopeHost } from './scope-host.js'
 import { createCdpScope } from './scope.js'
 import { startXvfb, type Xvfb, type XvfbOptions } from './xvfb.js'
 
@@ -56,6 +57,10 @@ export interface BrowserNodeOptions {
   display?: Display
   /** Turn `navigator.webdriver` off, which driving a browser over DevTools would turn on (default true). */
   hideWebdriver?: boolean
+  /** What this node's operator calls it: a slot can ask for them (`nodeLabels`), and the relay only places it on a node that has them all. */
+  labels?: string[]
+  /** Only take slots that ask for one of this node's labels, so ordinary slots do not fill (say) a machine on a home connection. */
+  exclusive?: boolean
   /** For tests: how Xvfb is found and started. */
   xvfb?: XvfbOptions
   /** Keep Chromium's own sandbox on (needs user namespaces). */
@@ -90,8 +95,15 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
     hideWebdriver = true,
     sandbox = false,
     isolation = 'context',
+    labels = [],
+    exclusive = false,
     logger = {}
   } = options
+  // What a slot can ask of this node. A proxy is per context, so a shared Chromium does it too. A time zone and a language are
+  // set when a browser starts, so only a Chromium of its own per slot can.
+  // What a slot can ask of this node. A proxy is per context, so a shared Chromium does it too. A time zone and a language are
+  // set when a browser starts, so only a Chromium of its own per slot can.
+  const features: string[] = [NODE_FEATURE.proxy, ...(isolation === 'process' ? [NODE_FEATURE.locale] : [])]
   const executable = options.executable ?? findChromium()
   if (!executable) {
     throw new ConfigError('Chromium was not found. Use the browserbay image, or set BROWSERBAY_CHROMIUM_EXECUTABLE.')
@@ -193,6 +205,9 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
         nodeId,
         scope: processHost,
         maxContexts,
+        features,
+        labels,
+        exclusive,
         logger
       })
     } else {
@@ -215,7 +230,18 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
           ).unref()
         )
       ])
-      agent = startAgent({ relayUrl, allowInsecureRelay, enrollmentSecret, nodeId, scope, maxContexts, logger })
+      agent = startAgent({
+        relayUrl,
+        allowInsecureRelay,
+        enrollmentSecret,
+        nodeId,
+        scope: createScopeHost(scope, { logger }),
+        maxContexts,
+        features,
+        labels,
+        exclusive,
+        logger
+      })
     }
   } catch (error) {
     await stop(errorMessage(error), true)

@@ -22,7 +22,7 @@ from ._protocol import (
     SLOTS_PATH,
     TOKEN_HEADER,
 )
-from ._types import NodeSummary, SlotSummary, StoredSlot
+from ._types import NodeSummary, Proxy, SlotSummary, StoredSlot
 from ._version import __version__
 
 # Longer than the relay's own wait, so a full box is answered with 503 and not cut off by this side's timer.
@@ -76,6 +76,15 @@ class QuotaExceededError(BrowserBayError):
         super().__init__("This API key's quota of browsers is used up", 429)
 
 
+class UnsupportedError(BrowserBayError):
+    """The box cannot give what ``acquire`` asked for: a proxy, a time zone, a language or a node label.
+
+    Either no node it has can (HTTP 422), or the box is older than the option and would have answered with a plain browser,
+    which here is a browser that goes out from the box's own address. Nothing is left running: a browser made without what
+    was asked for is released before this is raised.
+    """
+
+
 class _NoRedirects(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: it could carry the API key or a slot token to another host."""
 
@@ -110,6 +119,22 @@ def _request(
         # URLError, timeouts, resets and a dropped connection are all "the box could not be asked".
         reason = getattr(error, "reason", None) or error
         raise BrowserBayError(f"The browser service could not be reached ({type(reason).__name__}: {reason})") from error
+
+
+def _strings(value: Any) -> Tuple[str, ...]:
+    """The strings in a list the box sent, and nothing if it sent something else (a box that predates the field sent none)."""
+    return tuple(item for item in value if isinstance(item, str)) if isinstance(value, list) else ()
+
+
+def _proxy_body(proxy: Union[Proxy, Mapping[str, Any]]) -> Dict[str, Any]:
+    """What is sent for a proxy: a :class:`Proxy` or a dict with a ``server``. Checked only as far as its types."""
+    fields = proxy.to_dict() if isinstance(proxy, Proxy) else dict(proxy) if isinstance(proxy, Mapping) else None
+    if fields is None or not isinstance(fields.get("server"), str):
+        raise TypeError('proxy must be a Proxy, or a dict with a server such as {"server": "http://proxy.example.com:8080"}')
+    for name, value in fields.items():
+        if not isinstance(value, str):
+            raise TypeError(f"proxy.{name} must be a string")
+    return fields
 
 
 def _json_object(body: bytes) -> Dict[str, Any]:
@@ -361,7 +386,17 @@ class BrowserBay:
 
     # ---- public API --------------------------------------------------------------------------------------------
 
-    def acquire(self, run_id: str, max_lifetime_seconds: int, wait_ms: int = 30_000) -> "Slot":
+    def acquire(
+        self,
+        run_id: str,
+        max_lifetime_seconds: int,
+        wait_ms: int = 30_000,
+        *,
+        proxy: Union[Proxy, Mapping[str, Any], None] = None,
+        timezone: Optional[str] = None,
+        locale: Optional[str] = None,
+        node_labels: Optional[Sequence[str]] = None,
+    ) -> "Slot":
         """Takes a browser.
 
         :param run_id: Your own id for what the browser is for (a run, a task, a job), up to 200 characters with the
@@ -370,7 +405,16 @@ class BrowserBay:
             connected. 60 to 86400.
         :param wait_ms: How long to wait for a free slot before giving up with :class:`NoCapacityError`, in whole
             milliseconds (0 means do not wait). The box caps it at its own maximum. Default 30000.
+        :param proxy: Send the slot's traffic through this proxy: a :class:`Proxy`, or a dict with a ``server`` and
+            optionally ``username``, ``password`` and ``bypass``. The credentials stay on the box's node.
+        :param timezone: The IANA time zone the slot's browser runs in, such as ``Europe/Berlin``. Only a box whose nodes
+            run ``BROWSERBAY_ISOLATION=process`` can.
+        :param locale: The slot's browser language, such as ``de-DE``. Only a box whose nodes run
+            ``BROWSERBAY_ISOLATION=process`` can.
+        :param node_labels: Only place the slot on a node that carries every one of these labels.
         :raises NoCapacityError: The box stayed full for the whole wait.
+        :raises UnsupportedError: Options were asked for and the box cannot give them (no node can, or the box is older
+            than the options). A browser made without them is released first.
         :raises QuotaExceededError: The API key's quota of browsers is used up.
         :raises ForbiddenError: The API key may not use this run id (it is confined to another namespace).
         :raises BrowserBayError: The box refused, answered oddly, or could not be reached.
@@ -392,11 +436,29 @@ class BrowserBay:
         wait = _whole_number("wait_ms", wait_ms, "a whole number of milliseconds, 0 or more")
         if wait < 0:
             raise ValueError("wait_ms must be a whole number of milliseconds, 0 or more")
+        # Only what was asked for is sent, so a request without options is the one a box has always taken.
+        options: Dict[str, Any] = {}
+        if proxy is not None:
+            options["proxy"] = _proxy_body(proxy)
+        for name, value in (("timezone", timezone), ("locale", locale)):
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a string")
+            options[name] = value
+        if node_labels is not None:
+            if isinstance(node_labels, str) or not all(isinstance(label, str) for label in node_labels):
+                raise TypeError("node_labels must be a list of strings")
+            if len(node_labels) > 0:
+                options["nodeLabels"] = list(node_labels)
+        request: Dict[str, Any] = {"runId": full_run_id, "maxLifetimeSeconds": lifetime, "waitMs": wait, **options}
+        # What was asked for is exactly the options: the plain fields are not among them, whatever is added to either part.
+        asked = list(options)
         status, body = self._api(
             self._url,
             SLOTS_PATH,
             "POST",
-            {"runId": full_run_id, "maxLifetimeSeconds": lifetime, "waitMs": wait},
+            request,
             timeout=wait / 1000 + _ACQUIRE_TIMEOUT_MARGIN_S,
         )
         # The box held the request for the whole wait and still found no node with room (or lost the node it chose).
@@ -407,12 +469,34 @@ class BrowserBay:
             raise ForbiddenError()
         if status == 429:
             raise QuotaExceededError()
+        if status in (400, 422):
+            # The box says what is wrong with what was asked for. It never repeats a credential, so the text is safe to show.
+            try:
+                said = _json_object(body).get("message")
+            except BrowserBayError:
+                said = None
+            detail = f": {said}" if isinstance(said, str) and said else ""
+            if status == 422:
+                raise UnsupportedError(f"The box cannot give this browser{detail}", 422)
+            raise BrowserBayError(f"The browser service refused the request (400){detail}", 400)
         if not 200 <= status < 300:
             raise BrowserBayError(f"The browser service could not start a browser ({status})", status)
         created = _json_object(body)
         slot_id, token, node_id = created.get("slotId"), created.get("token"), created.get("nodeId")
         if not (slot_id and token and node_id) or not all(isinstance(v, str) for v in (slot_id, token, node_id)):
             raise BrowserBayError("The browser service returned an incomplete slot", status)
+        # A box older than these options answers 201 and ignores what it does not know: the browser it made is a plain one.
+        applied = created.get("applied")
+        missing = [name for name in asked if not (isinstance(applied, list) and name in applied)]
+        if missing:
+            try:
+                self._delete(self._url, slot_id)
+            except BrowserBayError as error:
+                _log.warning("Could not release a browser made without the options asked for (%s)", error.status)
+            raise UnsupportedError(
+                f"The box did not apply {', '.join(missing)}: it is older than these options. "
+                "Upgrade the box (its relay and nodes)"
+            )
         return self._make_slot(self._url, slot_id, token, node_id)
 
     def slot(self, stored: Mapping[str, Any]) -> "Slot":
@@ -497,6 +581,9 @@ class BrowserBay:
                     contexts=counts[1] or 0,
                     draining=bool(item.get("draining")),
                     last_seen_at=str(item.get("lastSeenAt") or ""),
+                    features=_strings(item.get("features")),
+                    labels=_strings(item.get("labels")),
+                    exclusive=bool(item.get("exclusive")),
                 )
             )
         return result

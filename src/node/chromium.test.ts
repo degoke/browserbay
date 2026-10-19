@@ -71,7 +71,7 @@ test('chromium environment: an operator can pass named variables through, but ne
   )
 })
 
-test('chromium command line: DevTools on a pipe, no port; sandbox and headless as asked', () => {
+test('chromium command line: DevTools on a pipe, no port; sandbox and display as asked', () => {
   const args = chromiumArgs({ profileDir: '/p' })
   assert.ok(args.includes('--remote-debugging-pipe'))
   assert.ok(!args.some((arg) => arg.startsWith('--remote-debugging-port')), 'no DevTools port for anything to reach')

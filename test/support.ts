@@ -11,7 +11,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import { WebSocket } from 'ws'
+import { createBrowserBay } from '../src/client/index.js'
+import { startBrowserNode, type Isolation } from '../src/node/browser-node.js'
+import type { Display } from '../src/node/chromium.js'
 import { startXvfb } from '../src/node/xvfb.js'
+import { hashToken } from '../src/relay/registry.js'
+import { createRelayServer } from '../src/relay/server.js'
 
 export const enabled = process.env.PLAYWRIGHT_BROWSER_TESTS === '1'
 
@@ -96,6 +101,71 @@ export function rawSocket(url: string, headers: Record<string, string> = {}) {
     /** Drops the connection without a goodbye, as a killed process would. */
     kill: () => socket.terminate(),
     close: () => socket.close()
+  }
+}
+
+// ---- a whole box in this process ---------------------------------------------------------------------------------
+
+const BOX_API_KEY = 'browser-test-api-key-0123456789'
+const BOX_SECRET = 'browser-test-enrollment-secret'
+
+/**
+ * A relay and one node of real Chromium, in this process, and the client a service uses. What both say is kept in `logs`, so a
+ * test can look for something that must never be logged. `display` follows BROWSERBAY_HEADLESS unless a test says otherwise.
+ */
+export async function startBox(
+  options: {
+    display?: Display
+    isolation?: Isolation
+    hideWebdriver?: boolean
+    labels?: string[]
+    exclusive?: boolean
+    maxContexts?: number
+  } = {}
+) {
+  const logs: string[] = []
+  const logger = {
+    info: (message: string, fields?: Record<string, unknown>) =>
+      void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
+    warn: (message: string, fields?: Record<string, unknown>) =>
+      void logs.push(`${message} ${JSON.stringify(fields ?? {})}`)
+  }
+  const relay = createRelayServer({
+    apiKey: BOX_API_KEY,
+    enrollmentSecrets: [{ id: 'test', sha256: hashToken(BOX_SECRET) }],
+    nodeTimeoutMs: 60_000,
+    // The node is connected before a test asks for anything, so a request nobody could serve is answered at once.
+    unsupportedGraceMs: 0,
+    logger
+  })
+  const port = await relay.listen(0, '127.0.0.1')
+  const base = `http://127.0.0.1:${port}`
+  const node = await startBrowserNode({
+    relayUrl: base,
+    enrollmentSecret: BOX_SECRET,
+    nodeId: 'browser-test-node',
+    maxContexts: options.maxContexts ?? 4,
+    executable: chromium.executablePath(),
+    display: options.display ?? (xvfb ? 'xvfb' : 'headless'),
+    isolation: options.isolation,
+    hideWebdriver: options.hideWebdriver,
+    labels: options.labels,
+    exclusive: options.exclusive,
+    logger
+  })
+  await until(() => relay.registry.listNodes().length === 1, 'the node to join', 60_000)
+  const box = createBrowserBay({ url: base, apiKey: BOX_API_KEY })
+  return {
+    relay,
+    box,
+    base,
+    logs,
+    acquire: (runId: string, extra: Partial<Parameters<typeof box.acquire>[0]> = {}) =>
+      box.acquire({ runId, maxLifetimeSeconds: 600, waitMs: 10_000, ...extra }),
+    async close() {
+      await node.close()
+      await relay.close()
+    }
   }
 }
 

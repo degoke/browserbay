@@ -5,6 +5,8 @@ import test from 'node:test'
 import { WebSocket, WebSocketServer } from 'ws'
 import { assertSecureRelayUrl, classifyRelayUrl, sendsSecretInTheClear, startAgent, type Agent } from './agent.js'
 import { createFakeChromium, type FakeChromium } from './fake-chromium.js'
+import { createScopeHost } from './scope-host.js'
+import { SlotRefusedError } from '../slot-options.js'
 import { createCdpScope } from './scope.js'
 import { hashToken } from '../relay/registry.js'
 import { CLOSE, RELAY_PATHS, TOKEN_HEADER } from '../protocol.js'
@@ -87,7 +89,7 @@ async function agentOnFakeRelay(overrides: Partial<Parameters<typeof startAgent>
     relayUrl: relay.url,
     enrollmentSecret: SECRET,
     nodeId: 'node-1',
-    scope: browser.scope,
+    scope: createScopeHost(browser.scope),
     maxContexts: 2,
     reconnectMinMs: 20,
     reconnectMaxMs: 60,
@@ -341,7 +343,7 @@ async function nodeOn(
     relayUrl: base,
     enrollmentSecret: SECRET,
     nodeId: id,
-    scope,
+    scope: createScopeHost(scope),
     maxContexts: 2,
     reconnectMinMs: 20,
     reconnectMaxMs: 60
@@ -442,7 +444,7 @@ test('agent: says why the relay will not have it, instead of retrying in silence
     relayUrl: relay.url,
     enrollmentSecret: SECRET,
     nodeId: 'n1',
-    scope,
+    scope: createScopeHost(scope),
     reconnectMinMs: 5,
     reconnectMaxMs: 10,
     logger: { warn: (message: string, fields?: Record<string, unknown>) => warnings.push({ message, fields }) }
@@ -485,7 +487,7 @@ test('agent: a relay it cannot reach is reported with the address and the error,
     relayUrl: 'http://127.0.0.1:1',
     enrollmentSecret: SECRET,
     nodeId: 'n1',
-    scope,
+    scope: createScopeHost(scope),
     reconnectMinMs: 5,
     reconnectMaxMs: 10,
     logger: { warn: (message: string, fields?: Record<string, any>) => warnings.push({ message, fields }) }
@@ -537,7 +539,7 @@ test('agent: an error from one connection attempt is not blamed for a later atte
     relayUrl: 'http://127.0.0.1:1',
     enrollmentSecret: SECRET,
     nodeId: 'n1',
-    scope,
+    scope: createScopeHost(scope),
     reconnectMinMs: 5,
     reconnectMaxMs: 10,
     WebSocketImpl: ScriptedSocket as unknown as typeof globalThis.WebSocket,
@@ -555,7 +557,12 @@ test('agent: an error from one connection attempt is not blamed for a later atte
 test('agent: whenConnected ends when the agent is closed, instead of waiting out its timeout', async () => {
   const relay = await startFakeRelay()
   const { scope } = await startBrowser()
-  const agent = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n1', scope })
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'n1',
+    scope: createScopeHost(scope)
+  })
   try {
     await until(() => relay.of('hello').length === 1, 'the hello')
     const waiting = agent.whenConnected(30_000)
@@ -565,7 +572,12 @@ test('agent: whenConnected ends when the agent is closed, instead of waiting out
     assert.ok(Date.now() - started < 2000, 'it did not wait for its 30 s timeout')
 
     // And once the relay answers, it resolves from the welcome itself.
-    const again = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n2', scope })
+    const again = startAgent({
+      relayUrl: relay.url,
+      enrollmentSecret: SECRET,
+      nodeId: 'n2',
+      scope: createScopeHost(scope)
+    })
     try {
       const connected = again.whenConnected(10_000)
       await until(() => relay.of('hello').length >= 2, 'the second hello')
@@ -587,7 +599,7 @@ test('agent: closing an agent that keeps reconnecting leaves no connection behin
       relayUrl: relay.url,
       enrollmentSecret: SECRET,
       nodeId: 'n1',
-      scope,
+      scope: createScopeHost(scope),
       reconnectMinMs: 5,
       reconnectMaxMs: 10
     })
@@ -611,7 +623,12 @@ test('agent: a relay that sends things that are not messages does not take the n
   const uncaught: unknown[] = []
   const onUncaught = (error: unknown) => uncaught.push(error)
   process.on('uncaughtException', onUncaught)
-  const agent = startAgent({ relayUrl: relay.url, enrollmentSecret: SECRET, nodeId: 'n1', scope })
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'n1',
+    scope: createScopeHost(scope)
+  })
   try {
     await until(() => relay.of('hello').length === 1, 'the hello')
     for (const frame of ['null', 'true', '7', '"text"', '[]', '[null]', 'not json']) relay.control().send(frame)
@@ -725,7 +742,7 @@ test('a browser that stops answering fails a create instead of holding its slot 
     relayUrl: relay.url,
     enrollmentSecret: SECRET,
     nodeId: 'node-1',
-    scope,
+    scope: createScopeHost(scope),
     maxContexts: 1,
     reconnectMinMs: 20,
     reconnectMaxMs: 60
@@ -982,6 +999,145 @@ test('agent: a context still being closed holds its place, so a replacement cann
     await until(() => relay.of('context.created').length === 1, 'a create once the old browser is gone')
   } finally {
     finishDispose()
+    await agent.close()
+    await relay.close()
+  }
+})
+
+// ---- what a slot asks of its browser, and what a node says it can do --------------------------------------------------
+
+test('agent: the hello says what the node can do, what it is called and whether it is kept for its labels', async () => {
+  const { relay, agent } = await agentOnFakeRelay({
+    features: ['proxy', 'locale'],
+    labels: ['home', 'eu'],
+    exclusive: true
+  })
+  try {
+    assert.deepEqual(relay.of('hello')[0], {
+      t: 'hello',
+      secret: SECRET,
+      nodeId: 'node-1',
+      maxContexts: 2,
+      version: 1,
+      contexts: [],
+      features: ['proxy', 'locale'],
+      labels: ['home', 'eu'],
+      exclusive: true
+    })
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('agent: what a slot asked for reaches the host, checked; what the node cannot do or does not know fails the create and makes nothing', async () => {
+  const { scope } = await startBrowser()
+  const made: Array<[string, unknown]> = []
+  const host = {
+    createRun: async (runKey: string, options?: unknown) => {
+      made.push([runKey, options])
+      return scope.createRun(runKey)
+    },
+    disposeRun: (runKey: string) => scope.disposeRun(runKey),
+    connect: scope.connect
+  }
+  const relay = await startFakeRelay()
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope: host,
+    maxContexts: 10,
+    features: ['proxy']
+  })
+  const PASSWORD = 'agent-must-not-repeat-this'
+  try {
+    await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+    relay.send({ t: 'welcome', heartbeatMs: 40 })
+    await agent.whenConnected()
+
+    const proxy = { server: 'http://proxy.example.com:8080', username: 'u', password: PASSWORD }
+    relay.send(create('s1', { options: { proxy } }))
+    relay.send(create('s2', { options: { timezone: 'europe/berlin' } })) // a feature this node did not say it has
+    relay.send(create('s3', { options: { surprise: 1 } })) // an option it has never heard of
+    relay.send(
+      create('s4', { options: { proxy: { server: 'http://127.0.0.1:1', username: 'u', password: PASSWORD } } })
+    )
+    relay.send(create('s5', { options: 'proxy' }))
+    relay.send(create('s6')) // a plain slot
+    await until(
+      () => relay.of('context.created').length === 2 && relay.of('context.failed').length === 4,
+      'every answer'
+    )
+
+    assert.deepEqual(
+      made.map(([key]) => key).sort(),
+      ['s1', 's6'],
+      'the browser was only asked to make the slots it could make in full'
+    )
+    assert.deepEqual(made.find(([key]) => key === 's1')![1], { proxy })
+    assert.equal(made.find(([key]) => key === 's6')![1], undefined, 'a plain slot is made as it always was')
+
+    const failed = Object.fromEntries(relay.of('context.failed').map((frame) => [frame.reqId, String(frame.message)]))
+    assert.match(failed['req-s2']!, /does not offer: locale/)
+    assert.match(failed['req-s3']!, /does not know the option "surprise"/)
+    assert.match(failed['req-s4']!, /loopback/)
+    assert.match(failed['req-s5']!, /must be an object/)
+    assert.deepEqual(
+      Object.fromEntries(relay.of('context.failed').map((frame) => [frame.reqId, frame.refused])),
+      { 'req-s2': true, 'req-s3': true, 'req-s4': true, 'req-s5': true },
+      'each is said to be a refusal of the slot, not a node that is busy or broken'
+    )
+    assert.ok(
+      !JSON.stringify(relay.received).includes(`${PASSWORD}-`) && !Object.values(failed).join('').includes(PASSWORD),
+      'no refusal repeats the password'
+    )
+    assert.equal(agent.contextCount(), 2)
+  } finally {
+    await agent.close()
+    await relay.close()
+  }
+})
+
+test('agent: a host that refuses a slot says so with its own reason, and any other failure is the generic one', async () => {
+  const { scope } = await startBrowser()
+  const host = {
+    createRun: async (runKey: string) => {
+      if (runKey === 's1') throw new SlotRefusedError('This node does not have that time zone')
+      if (runKey === 's2') throw new Error('something broke: /secret/path')
+      return scope.createRun(runKey)
+    },
+    disposeRun: (runKey: string) => scope.disposeRun(runKey),
+    connect: scope.connect
+  }
+  const relay = await startFakeRelay()
+  const agent = startAgent({
+    relayUrl: relay.url,
+    enrollmentSecret: SECRET,
+    nodeId: 'node-1',
+    scope: host,
+    maxContexts: 5
+  })
+  try {
+    await until(() => relay.of('hello').length > 0, 'the agent’s hello')
+    relay.send({ t: 'welcome', heartbeatMs: 40 })
+    await agent.whenConnected()
+    relay.send(create('s1'))
+    relay.send(create('s2'))
+    await until(() => relay.of('context.failed').length === 2, 'both failures')
+    const byReq = Object.fromEntries(relay.of('context.failed').map((frame) => [frame.reqId, frame]))
+    assert.deepEqual(byReq['req-s1'], {
+      t: 'context.failed',
+      reqId: 'req-s1',
+      message: 'This node does not have that time zone',
+      refused: true
+    })
+    assert.deepEqual(
+      byReq['req-s2'],
+      { t: 'context.failed', reqId: 'req-s2', message: 'The browser could not create a context' },
+      'what broke is the node’s own business: no detail, and not a refusal'
+    )
+  } finally {
     await agent.close()
     await relay.close()
   }

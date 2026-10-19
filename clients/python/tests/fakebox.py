@@ -43,6 +43,7 @@ class FakeBox:
         slot_lookups: Optional[List[Union[str, int]]] = None,
         now: Optional[Callable[[], float]] = None,
         nodes: Optional[List[Dict[str, Any]]] = None,
+        modern: bool = False,
     ) -> None:
         self.prefix = prefix
         self.create_status = create_status
@@ -51,6 +52,8 @@ class FakeBox:
         self.list_status = list_status
         self.slot_lookups = list(slot_lookups or [])
         self.nodes = nodes
+        # A box that knows the slot options says which of the request's it applied; off, it predates them and says nothing.
+        self.modern = modern
         self.now = now or (lambda: datetime.now(timezone.utc).timestamp())
         self.calls: List[Call] = []
         self.slots: Dict[str, Dict[str, str]] = {}
@@ -125,7 +128,7 @@ class FakeBox:
                 if not as_owner:
                     return reply(401, {"error": "unauthorized"})
                 if self.create_status and self.create_status != 201:
-                    return reply(self.create_status)
+                    return reply(self.create_status, self.create_body)
                 if self.create_body is not None:
                     return reply(201, self.create_body)
                 self._counter += 1
@@ -138,7 +141,10 @@ class FakeBox:
                     "token": f"slot-token-{self._counter}-PLAINTEXT",
                 }
                 self.slots[slot_id] = slot
-                return reply(201, {"slotId": slot_id, "token": slot["token"], "nodeId": slot["nodeId"]})
+                created: Dict[str, Any] = {"slotId": slot_id, "token": slot["token"], "nodeId": slot["nodeId"]}
+                if self.modern:
+                    created["applied"] = [n for n in ("proxy", "timezone", "locale", "nodeLabels") if n in body]
+                return reply(201, created)
 
             if path == "/v1/slots" and method == "GET":
                 if not as_owner:

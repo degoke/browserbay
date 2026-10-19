@@ -761,7 +761,7 @@ test('dedicated: the client can make contexts of its own, and they are the runâ€
   const { fake, client } = world
   const first = await client.call('Target.createBrowserContext', {
     disposeOnDetach: true,
-    proxyServer: 'http://proxy:3128',
+    proxyServer: 'http://203.0.113.9:3128',
     originsWithUniversalNetworkAccess: ['https://x'],
     browserContextId: 'ignored',
     other: 1
@@ -771,7 +771,7 @@ test('dedicated: the client can make contexts of its own, and they are the runâ€
   const sent = fake.commands('Target.createBrowserContext').at(-1)!.params
   assert.deepEqual(
     sent,
-    { proxyServer: 'http://proxy:3128', disposeOnDetach: false },
+    { proxyServer: 'http://203.0.113.9:3128', disposeOnDetach: false },
     'only a proxy passes, and it outlives any connection'
   )
   assert.deepEqual(fake.commands('Browser.setDownloadBehavior').at(-1)?.params, {
@@ -854,4 +854,96 @@ test('dedicated: what keeps the node safe stays fenced, because it never depende
     eventsEnabled: false,
     browserContextId: world.contextId
   })
+})
+
+// ---- a slot's proxy ---------------------------------------------------------------------------------------------------
+
+test('a run made with a proxy has its context made with it, and a plain run with none', async () => {
+  const { fake, scope } = await setup()
+  await scope.createRun('plain')
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, { disposeOnDetach: false })
+  await scope.createRun('empty', {})
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, { disposeOnDetach: false })
+
+  await scope.createRun('proxied', { proxyServer: 'socks5://127.5.6.7:4000', proxyBypassList: '<-loopback>;a.test' })
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.7:4000',
+    proxyBypassList: '<-loopback>;a.test'
+  })
+  await scope.createRun('no-bypass', { proxyServer: 'socks5://127.5.6.8:4001' })
+  assert.deepEqual(fake.commands('Target.createBrowserContext').at(-1)!.params, {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.8:4001'
+  })
+})
+
+test('dedicated: a context the client makes starts from the slotâ€™s proxy unless it names its own', async () => {
+  const world = await setup({ dedicated: true })
+  await world.scope.createRun('slot', { proxyServer: 'socks5://127.5.6.7:4000', proxyBypassList: '<-loopback>;a.test' })
+  const client = connect(world.scope, world.fake, 'slot')
+  const sent = () => world.fake.commands('Target.createBrowserContext').at(-1)!.params
+
+  await client.call('Target.createBrowserContext')
+  assert.deepEqual(sent(), {
+    disposeOnDetach: false,
+    proxyServer: 'socks5://127.5.6.7:4000',
+    proxyBypassList: '<-loopback>;a.test'
+  })
+
+  await client.call('Target.createBrowserContext', { proxyServer: 'http://203.0.113.9:3128' })
+  assert.deepEqual(
+    sent(),
+    { disposeOnDetach: false, proxyServer: 'http://203.0.113.9:3128' },
+    'its own, with none of the slotâ€™s bypass list'
+  )
+
+  await client.call('Target.createBrowserContext', {
+    proxyServer: 'http://203.0.113.9:3128',
+    proxyBypassList: 'b.test'
+  })
+  assert.deepEqual(sent(), {
+    disposeOnDetach: false,
+    proxyServer: 'http://203.0.113.9:3128',
+    proxyBypassList: 'b.test'
+  })
+
+  // A plain slot's contexts stay plain.
+  await world.scope.createRun('plain-slot')
+  const plain = connect(world.scope, world.fake, 'plain-slot')
+  await plain.call('Target.createBrowserContext')
+  assert.deepEqual(sent(), { disposeOnDetach: false })
+})
+
+test('dedicated: a client cannot point a context of its own at the node itself, however it writes the address', async () => {
+  const world = await setup({ dedicated: true })
+  await world.scope.createRun('slot', { proxyServer: 'socks5://127.5.6.7:4000' })
+  const client = connect(world.scope, world.fake, 'slot')
+  const made = () => world.fake.commands('Target.createBrowserContext').length
+  const before = made()
+
+  for (const proxyServer of [
+    '127.0.0.1:9',
+    'socks5://localhost:1080',
+    'http://[::1]:80',
+    '0x7f000001:80',
+    'socks5://127.5.6.7:4000', // another slot's forwarder is on loopback too
+    '203.0.113.9:1,127.1:2',
+    'http=203.0.113.9:80;https=localhost:443',
+    'http://169.254.169.254:80',
+    'http://127.5.6.7.nip.io:4000', // a name: Chromium resolves it, and it can be made to point at another slot's forwarder
+    'proxy.example.com:8080',
+    5 as never
+  ]) {
+    const answer = await client.call('Target.createBrowserContext', { proxyServer })
+    assert.equal(answer.error?.code, -32602, JSON.stringify(proxyServer))
+    assert.match(answer.error?.message, /proxy cannot be used/)
+  }
+  assert.equal(made(), before, 'none of them reached the browser')
+  assert.ok(world.warnings.some((message) => /refused proxy/.test(message)))
+  // An ordinary one still works.
+  assert.equal(
+    (await client.call('Target.createBrowserContext', { proxyServer: 'http://203.0.113.9:3128' })).error,
+    undefined
+  )
 })

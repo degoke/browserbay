@@ -12,6 +12,7 @@ test('node settings: the defaults, and each of the node’s own settings read fr
   const defaults = parseNodeSettings({})
   assert.equal(defaults.maxContexts, 5)
   assert.equal(defaults.drainSeconds, 120)
+  assert.equal(defaults.display, 'headless', 'no display unless asked for')
   assert.equal(defaults.hideWebdriver, true)
   assert.equal(defaults.sandbox, false)
   assert.equal(defaults.profileDir, undefined, 'a fresh temporary profile unless one is named')
@@ -33,6 +34,8 @@ test('node settings: the defaults, and each of the node’s own settings read fr
     profileDir: '/data/profile',
     display: 'host',
     hideWebdriver: true,
+    labels: [],
+    exclusive: false,
     sandbox: true,
     isolation: 'process'
   })
@@ -61,6 +64,36 @@ test('node settings: BROWSERBAY_HEADLESS picks the display, BROWSERBAY_WEBDRIVER
   assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'hide' }).hideWebdriver, true)
   assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: '' }).hideWebdriver, true, 'empty is not set')
   assert.throws(() => parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'off' }), /BROWSERBAY_WEBDRIVER_FLAG must be/)
+})
+
+test('node settings: labels name a node, and an exclusive node must have one', () => {
+  assert.deepEqual(parseNodeSettings({}).labels, [])
+  assert.equal(parseNodeSettings({}).exclusive, false)
+  assert.deepEqual(parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'residential, eu-west ,residential,' }).labels, [
+    'residential',
+    'eu-west'
+  ])
+  assert.deepEqual(parseNodeSettings({ BROWSERBAY_NODE_LABELS: '   ' }).labels, [], 'blank is not set')
+  const exclusive = parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'home', BROWSERBAY_NODE_EXCLUSIVE: 'true' })
+  assert.equal(exclusive.exclusive, true)
+  for (const notTrue of ['', 'false', 'TRUE', 'yes', '1']) {
+    assert.equal(
+      parseNodeSettings({ BROWSERBAY_NODE_LABELS: 'home', BROWSERBAY_NODE_EXCLUSIVE: notTrue }).exclusive,
+      false,
+      `only the exact word "true" turns it on, not ${JSON.stringify(notTrue)}`
+    )
+  }
+  for (const value of ['a b', 'a/b', 'é', 'x'.repeat(64)]) {
+    assert.throws(() => parseNodeSettings({ BROWSERBAY_NODE_LABELS: value }), /BROWSERBAY_NODE_LABELS/, value)
+  }
+  assert.throws(
+    () => parseNodeSettings({ BROWSERBAY_NODE_LABELS: Array.from({ length: 17 }, (_, i) => `l${i}`).join(',') }),
+    /at most 16 labels/
+  )
+  assert.throws(
+    () => parseNodeSettings({ BROWSERBAY_NODE_EXCLUSIVE: 'true' }),
+    /BROWSERBAY_NODE_EXCLUSIVE needs BROWSERBAY_NODE_LABELS/
+  )
 })
 
 test('node settings: what the relay would refuse is refused here, at startup, with the setting named', () => {

@@ -26,15 +26,40 @@ curl -X POST https://browsers.example.com/v1/slots \
   -d '{ "runId": "task-42", "maxLifetimeSeconds": 1800, "waitMs": 5000 }'
 ```
 
-| Status | Body                              | Meaning                                                                                                     |
-| ------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `201`  | `{ "slotId", "token", "nodeId" }` | You have a browser. The token is shown once.                                                                |
-| `503`  | `no_capacity`                     | Every node is full, or none is connected.                                                                   |
-| `403`  | `forbidden`                       | The key is confined to a namespace and the run id is outside it.                                            |
-| `429`  | `quota_exceeded`                  | The key's namespace already holds as many browsers as its quota allows. Answered at once: it does not wait. |
-| `400`  |                                   | A bad body: `runId` is 1 to 200 characters, `maxLifetimeSeconds` is 60 to 86400.                            |
+| Status | Body                                         | Meaning                                                                                                                                                                                                                                                                                            |
+| ------ | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `201`  | `{ "slotId", "token", "nodeId", "applied" }` | You have a browser. The token is shown once. `applied` names the options of the request that the slot has.                                                                                                                                                                                         |
+| `503`  | `no_capacity`                                | Every node is full, or none is connected.                                                                                                                                                                                                                                                          |
+| `422`  | `unsupported`, with a `message`              | Nodes are connected, and none could serve this request. Either none has a feature or a label it asks for, or every node that does refused the slot's value (a time zone its system lacks, an option it does not know): the `message` says which. Answered at once, because waiting would not help. |
+| `403`  | `forbidden`                                  | The key is confined to a namespace and the run id is outside it.                                                                                                                                                                                                                                   |
+| `429`  | `quota_exceeded`                             | The key's namespace already holds as many browsers as its quota allows. Answered at once: it does not wait.                                                                                                                                                                                        |
+| `400`  | `invalid_request`, usually with a `message`  | A bad body: `runId` is 1 to 200 characters, `maxLifetimeSeconds` is 60 to 86400, a field the box does not know, or an option that is wrong. The message says which.                                                                                                                                |
 
 `waitMs` defaults to 0 here, while the client's default is 30 seconds. The box caps it at its `BROWSERBAY_MAX_ACQUIRE_WAIT_MS`.
+
+### Options for the browser
+
+All are optional. A request without them is the one a box has always taken.
+
+| Field        | Meaning                                                                                                                                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `proxy`      | `{ "server", "username"?, "password"?, "bypass"? }`. The slot's traffic goes through this proxy. `server` is `http://`, `https://` or `socks5://` with `host:port` and nothing else. A loopback, unspecified or link-local address is refused (`400`). |
+| `timezone`   | An IANA time zone such as `Europe/Berlin`. Needs a node running `BROWSERBAY_ISOLATION=process`.                                                                                                                                                        |
+| `locale`     | A language tag such as `de-DE`: the browser's `navigator.language` and `Accept-Language`. Needs a node running `BROWSERBAY_ISOLATION=process`.                                                                                                         |
+| `nodeLabels` | A list of labels. The slot is only placed on a node that carries all of them (`BROWSERBAY_NODE_LABELS`).                                                                                                                                               |
+
+```sh
+curl -X POST https://browsers.example.com/v1/slots \
+  -H "Authorization: Bearer $BROWSERBAY_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "runId": "task-42", "maxLifetimeSeconds": 1800,
+        "proxy": { "server": "http://proxy.example.com:8080", "username": "user", "password": "secret" },
+        "nodeLabels": ["residential"] }'
+```
+
+**Check `applied`.** A box older than these options answers `201` and ignores a field it does not know, and the browser it made is a plain one: for a proxy, a browser that goes out from the box's own address. From this version the box refuses a field it does not know (`400`), and the clients check that `applied` has what they asked for, release the browser and fail with `UnsupportedError` if it does not. If you call the API yourself, do the same.
+
+The password is passed to the one node that makes the browser and is kept nowhere: it is not in the relay's tables, in `GET /v1/slots`, in `GET /v1/nodes` or in a log.
 
 ## Connect to the browser
 

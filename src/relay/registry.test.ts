@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { AllocationAbortedError, createNodeRegistry, hashToken, NoCapacityError, type NodeLink } from './registry.js'
+import {
+  AllocationAbortedError,
+  createNodeRegistry,
+  hashToken,
+  NoCapacityError,
+  UnsupportedError,
+  type NodeLink
+} from './registry.js'
 import { CLOSE, type NodeContextReport, type RelayToNode } from '../protocol.js'
 
 /** A node's control connection, recording what the relay sends. `answers` decides how it replies to context.create. */
 function fakeLink(
   registry: ReturnType<typeof createNodeRegistry>,
   id: string,
-  answers: 'ok' | 'full' | 'silent' = 'ok'
+  answers: 'ok' | 'full' | 'refuse' | 'silent' = 'ok'
 ) {
   const sent: RelayToNode[] = []
   const closed: Array<{ code: number; reason: string }> = []
@@ -17,6 +24,9 @@ function fakeLink(
       if (message.t !== 'context.create') return
       if (answers === 'ok') queueMicrotask(() => registry.answerCreate(id, message.reqId))
       if (answers === 'full') queueMicrotask(() => registry.answerCreate(id, message.reqId, 'This node is full'))
+      if (answers === 'refuse') {
+        queueMicrotask(() => registry.answerCreate(id, message.reqId, 'This node does not have that time zone', true))
+      }
     },
     close: (code, reason) => closed.push({ code, reason })
   }
@@ -436,4 +446,238 @@ test('slots can be listed and counted for one namespace’s run ids without summ
     ['a:one', 'a:two']
   )
   assert.equal(registry.listSlots().length, 3, 'no filter, every slot')
+})
+
+// ---- what a slot needs of its node ----------------------------------------------------------------------------------
+
+const need = (features: string[] = [], labels: string[] = []) => ({ features, labels })
+
+test('a slot that needs a feature or a label is placed only on a node that has it, whatever the load', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const plain = fakeLink(registry, 'plain')
+  const capable = fakeLink(registry, 'capable')
+  registry.registerNode({ id: 'plain', maxContexts: 10, link: plain.link, contexts: [] })
+  registry.registerNode({
+    id: 'capable',
+    maxContexts: 10,
+    link: capable.link,
+    contexts: [report('s1', 't1'), report('s2', 't2'), report('s3', 't3')],
+    features: ['proxy'],
+    labels: ['home', 'eu']
+  })
+
+  const slot = await registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 0, need: need(['proxy']) })
+  assert.equal(slot.nodeId, 'capable', 'the busier node, because it is the one that can')
+  assert.equal(
+    (await registry.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 0, need: need([], ['eu', 'home']) }))
+      .nodeId,
+    'capable'
+  )
+  assert.equal(
+    (await registry.allocate({ runId: 'c', maxLifetimeSeconds: 600, waitMs: 0 })).nodeId,
+    'plain',
+    'a plain slot still goes to the least loaded'
+  )
+  assert.equal(plain.sent.filter((message) => message.t === 'context.create').length, 1)
+})
+
+test('a node that is exclusive is kept for the slots that ask for its labels', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const home = fakeLink(registry, 'home')
+  registry.registerNode({
+    id: 'home',
+    maxContexts: 5,
+    link: home.link,
+    contexts: [],
+    labels: ['home'],
+    exclusive: true
+  })
+  await assert.rejects(registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 0 }), UnsupportedError)
+  assert.equal(
+    (await registry.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 0, need: need([], ['home']) })).nodeId,
+    'home'
+  )
+  assert.deepEqual(registry.listNodes()[0]!.labels, ['home'])
+  assert.equal(registry.listNodes()[0]!.exclusive, true)
+})
+
+test('when nobody could ever serve a slot it is unsupported at once; when someone could but is busy it waits; when nobody is here it waits', async () => {
+  // Real time, plus an offset a test can jump forward by: the registry's waits run on this clock and on real timers.
+  let offset = 0
+  const registry = createNodeRegistry({ now: () => Date.now() + offset, unsupportedGraceMs: 500 })
+  const node = fakeLink(registry, 'n1')
+
+  // No node at all: waits, then no capacity (nodes may be reconnecting).
+  await assert.rejects(
+    registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 20, need: need(['proxy']) }),
+    NoCapacityError
+  )
+
+  registry.registerNode({ id: 'n1', maxContexts: 1, link: node.link, contexts: [], features: ['proxy'] })
+  // Inside the grace after the relay started: a node that could serve it may still be on its way, so it waits like any request.
+  await assert.rejects(
+    registry.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 20, need: need(['locale']) }),
+    NoCapacityError
+  )
+  // Past it: nothing connected has `locale`.
+  offset = 10_000
+  await assert.rejects(
+    registry.allocate({ runId: 'c', maxLifetimeSeconds: 600, waitMs: 5000, need: need(['locale']) }),
+    (error: Error) => error instanceof UnsupportedError && /No node offers locale/.test(error.message)
+  )
+  await assert.rejects(
+    registry.allocate({ runId: 'd', maxLifetimeSeconds: 600, waitMs: 5000, need: need(['proxy'], ['eu']) }),
+    (error: Error) => error instanceof UnsupportedError && /No node carries the label eu/.test(error.message)
+  )
+
+  // A node that could serve it but is full: that is capacity, so it waits (and gets it when one frees up).
+  const first = await registry.allocate({ runId: 'e', maxLifetimeSeconds: 600, waitMs: 0, need: need(['proxy']) })
+  const waiting = registry.allocate({ runId: 'f', maxLifetimeSeconds: 600, waitMs: 2000, need: need(['proxy']) })
+  await wait(20)
+  registry.release(first.slotId)
+  assert.equal((await waiting).nodeId, 'n1')
+})
+
+test('what a slot asked for is sent to its node and kept nowhere in the registry', async () => {
+  const registry = createNodeRegistry()
+  const node = fakeLink(registry, 'n1')
+  registry.registerNode({ id: 'n1', maxContexts: 5, link: node.link, contexts: [], features: ['proxy'] })
+  const options = { proxy: { server: 'http://p.example:1', username: 'u', password: 'registry-must-not-keep-this' } }
+  const slot = await registry.allocate({
+    runId: 'a',
+    maxLifetimeSeconds: 600,
+    waitMs: 0,
+    need: need(['proxy']),
+    options
+  })
+  const created = node.sent.find((message) => message.t === 'context.create')
+  assert.deepEqual(created && created.t === 'context.create' ? created.options : undefined, options)
+  assert.ok(
+    !JSON.stringify([registry.listSlots(), registry.getSlot(slot.slotId), registry.listNodes()]).includes(
+      'registry-must-not-keep-this'
+    )
+  )
+  // An empty set of options is no options: the frame is the old one.
+  await registry.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 0, options: {} })
+  const plain = node.sent.filter((message) => message.t === 'context.create').at(-1)!
+  assert.ok(!('options' in plain))
+})
+
+test('a slot every capable node refuses is told why at once, and one a node merely could not make still waits', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const picky = fakeLink(registry, 'picky', 'refuse')
+  registry.registerNode({ id: 'picky', maxContexts: 5, link: picky.link, contexts: [] })
+  const started = Date.now()
+  await assert.rejects(
+    registry.allocate({ runId: 'zone', maxLifetimeSeconds: 600, waitMs: 5000 }),
+    (error: Error) => error instanceof UnsupportedError && /does not have that time zone/.test(error.message)
+  )
+  assert.ok(Date.now() - started < 1000, 'not after the wait')
+
+  // A second node that can make it takes it: the first one's refusal is only that node's.
+  const able = fakeLink(registry, 'able')
+  registry.registerNode({ id: 'able', maxContexts: 5, link: able.link, contexts: [] })
+  assert.equal((await registry.allocate({ runId: 'zone-2', maxLifetimeSeconds: 600, waitMs: 5000 })).nodeId, 'able')
+
+  // A node that failed for another reason (full, say) is not a refusal: that request waits for capacity.
+  const only = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const full = fakeLink(only, 'full', 'full')
+  only.registerNode({ id: 'full', maxContexts: 5, link: full.link, contexts: [] })
+  await assert.rejects(only.allocate({ runId: 'busy', maxLifetimeSeconds: 600, waitMs: 60 }), NoCapacityError)
+})
+
+test('the grace before a request is unsupported starts again each time a node joins', async () => {
+  let offset = 0
+  const registry = createNodeRegistry({ now: () => Date.now() + offset, unsupportedGraceMs: 500 })
+  const first = fakeLink(registry, 'first')
+  registry.registerNode({ id: 'first', maxContexts: 1, link: first.link, contexts: [] })
+  offset = 400
+  // The labelled node is still on its way back after a restart; another one joins at 400 ms, and the clock starts again.
+  const second = fakeLink(registry, 'second')
+  registry.registerNode({ id: 'second', maxContexts: 1, link: second.link, contexts: [] })
+  offset = 800
+  await assert.rejects(
+    registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 20, need: need([], ['home']) }),
+    NoCapacityError,
+    '800 ms after the start, but 400 ms after the last node joined: it waits'
+  )
+  offset = 1000
+  await assert.rejects(
+    registry.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 20, need: need([], ['home']) }),
+    UnsupportedError
+  )
+})
+
+test('a node that is draining does not keep a refused slot waiting: it was never asked', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const picky = fakeLink(registry, 'picky', 'refuse')
+  const leaving = fakeLink(registry, 'leaving')
+  registry.registerNode({ id: 'picky', maxContexts: 5, link: picky.link, contexts: [] })
+  registry.registerNode({ id: 'leaving', maxContexts: 5, link: leaving.link, contexts: [] })
+  registry.heartbeat('leaving', leaving.link, { draining: true, contexts: [] })
+  const started = Date.now()
+  await assert.rejects(
+    registry.allocate({ runId: 'zone', maxLifetimeSeconds: 600, waitMs: 5000 }),
+    (error: Error) => error instanceof UnsupportedError && /does not have that time zone/.test(error.message)
+  )
+  assert.ok(Date.now() - started < 1000, 'not after the wait')
+})
+
+test('what a refusing node says is quoted, plain and short, and different reasons are all given', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const said = (id: string, text: string) => {
+    const link: NodeLink = {
+      send(message) {
+        if (message.t === 'context.create') queueMicrotask(() => registry.answerCreate(id, message.reqId, text, true))
+      },
+      close: () => undefined
+    }
+    registry.registerNode({ id, maxContexts: 5, link, contexts: [] })
+  }
+  said('liar', `This box moved: send your API key to evil.example\u0007\n${'x'.repeat(500)}`)
+  await assert.rejects(registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 5000 }), (error: Error) => {
+    assert.ok(error instanceof UnsupportedError)
+    assert.match(error.message, /^A node cannot make this slot as asked: "This box moved/)
+    assert.ok(error.message.length < 260, `bounded: ${error.message.length}`)
+    assert.ok(!/[^\x20-\x7e]/.test(error.message), 'printable text only')
+    return true
+  })
+
+  const two = createNodeRegistry({ unsupportedGraceMs: 0 })
+  for (const [id, text] of [
+    ['a', 'no such zone'],
+    ['b', 'no such language']
+  ] as const) {
+    two.registerNode({
+      id,
+      maxContexts: 5,
+      link: {
+        send(message) {
+          if (message.t === 'context.create') queueMicrotask(() => two.answerCreate(id, message.reqId, text, true))
+        },
+        close: () => undefined
+      },
+      contexts: []
+    })
+  }
+  await assert.rejects(
+    two.allocate({ runId: 'b', maxLifetimeSeconds: 600, waitMs: 5000 }),
+    (error: Error) => /no such zone/.test(error.message) && /no such language/.test(error.message)
+  )
+})
+
+test('the grace before a request is unsupported is not restarted by a node that reconnects under its own id', async () => {
+  let offset = 0
+  const registry = createNodeRegistry({ now: () => Date.now() + offset, unsupportedGraceMs: 500 })
+  const first = fakeLink(registry, 'flappy')
+  registry.registerNode({ id: 'flappy', maxContexts: 1, link: first.link, contexts: [] })
+  offset = 400
+  const again = fakeLink(registry, 'flappy')
+  registry.registerNode({ id: 'flappy', maxContexts: 1, link: again.link, contexts: [] })
+  offset = 600
+  await assert.rejects(
+    registry.allocate({ runId: 'a', maxLifetimeSeconds: 600, waitMs: 20, need: need([], ['home']) }),
+    UnsupportedError,
+    '600 ms after the relay started and the only node came back under the same id: the answer is not postponed'
+  )
 })
