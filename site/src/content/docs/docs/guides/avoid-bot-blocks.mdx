@@ -1,0 +1,56 @@
+---
+title: Avoid bot blocks
+description: What a website sees when your browser comes from a box, what browserbay fixes by itself, and what is left for you.
+---
+
+import { Aside, TabItem, Tabs } from '@astrojs/starlight/components'
+
+Sites that block bots look at three things: **what the browser says about itself**, **where the traffic comes from**, and **how the visitor behaves**. A box can only do something about the first two, and it does the first one by default.
+
+browserbay stays a raw box. It does not fake a browser: no spoofed user agent, no forged WebGL or canvas values, no stealth scripts injected into pages. Values that disagree with each other (a Windows user agent on a Linux machine) are easier to spot than an honest browser. What the box does is stop announcing that it is automated, and give you the controls for the network side.
+
+## What a site sees
+
+This is what a page read from a slot of the default image, before and after the box stopped announcing itself.
+
+| Signal                      | A headless browser says          | The image's default says           |
+| --------------------------- | -------------------------------- | ---------------------------------- |
+| `navigator.userAgent`       | `…HeadlessChrome/151…`           | `…Chrome/151…`                     |
+| `User-Agent` header         | `HeadlessChrome`                 | `Chrome`                           |
+| Client hints (`brands`)     | the same name                    | `Chromium`, without `Headless`     |
+| `navigator.webdriver`       | `true`                           | `false`                            |
+| `screen` against the window | 800×600 inside a 1280×900 window | 1920×1080 inside a 1280×900 window |
+
+## What the box does by default
+
+- **Runs Chromium headful on a virtual display.** The Docker image sets `BROWSERBAY_HEADLESS=xvfb`: the node starts an Xvfb and Chromium opens on it. A headful Chromium has no `HeadlessChrome` in its user agent or client hints, and a screen as big as its window. Nothing is faked: it is the same browser.
+- **Turns `navigator.webdriver` off.** Driving a browser over DevTools turns it on, and any page can read it. The node starts Chromium with `--disable-blink-features=AutomationControlled`. Set `BROWSERBAY_WEBDRIVER_FLAG=keep` on a node whose browser should say what it is.
+- **Keeps the virtual display private.** The display needs a cookie to connect to, and only the node and its browser have it, so another process in the same container or pod cannot watch or drive your pages. With `BROWSERBAY_ISOLATION=process` each slot gets a display of its own, so slots do not share a clipboard.
+
+### What it costs
+
+A headful node uses more memory: about 65 MB more for Chromium, and about 80 MB for each virtual display. That is one display per node by default, and one per slot with `BROWSERBAY_ISOLATION=process`. Set `BROWSERBAY_HEADLESS=true` (and `node.headless=true` in the Helm chart) to go back to headless. A node on bare metal without Xvfb stays headless, because that is the default outside the image.
+
+A headful Chromium only paints the tab in front of its window: see [Watching a headful node](/docs/guides/live-view/#watching-a-headful-node).
+
+## Check what your slot shows
+
+The repository has a script that takes a slot, opens a tab over DevTools and reads those signals, and exits with an error if the browser says `HeadlessChrome`, has `navigator.webdriver` on, or has a screen smaller than its window. It needs only Node.
+
+```sh
+node scripts/smoke-box.mjs https://browsers.example.com "$BROWSERBAY_API_KEY"
+```
+
+Pass `--headless` for a node you run headless on purpose. CI runs it against the image it builds.
+
+## What is left, and what to do about it
+
+<Aside type="note" title="The address matters most">
+  A browser that looks like Chrome from a data center address is still a data center address. On a protected site, the
+  address is usually what decides the outcome.
+</Aside>
+
+- **WebGL reports a software renderer.** The image has no GPU, so a page reading the WebGL renderer sees SwiftShader. A node on a machine with a GPU does not.
+- **The time zone is UTC** unless the node's environment says otherwise (`TZ`).
+- **Behaviour.** A script that clicks at machine speed, never moves the mouse and loads fifty pages a second looks like a bot whatever the browser says.
+- **CAPTCHAs.** A CAPTCHA is a site asking for a person. browserbay does not solve them. A person can: see [Live view](/docs/guides/live-view/) and [Hand off and clean up](/docs/guides/hand-off/).

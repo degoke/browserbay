@@ -123,6 +123,14 @@ Your server forwards each frame to the person's browser over your own WebSocket 
 
 After the person is done, your service connects again with Playwright or Puppeteer. The pages, cookies and form state are what they left. Save the slot (`JSON.stringify(slot)`) before the handoff if the service that takes it back is a different process. See [Hand off and clean up](/docs/guides/hand-off/).
 
+## Watching a headful node
+
+The image runs Chromium headful, on a virtual display (`BROWSERBAY_HEADLESS=xvfb`). A headful browser only paints the tab in front of its window, so a screencast of a tab that is behind another sends no frames.
+
+- **Bring the tab to the front first.** Send `Target.activateTarget` for it (Playwright's `page.bringToFront()` does this), then start the screencast.
+- **Focus is shared on a shared Chromium.** With the default `BROWSERBAY_ISOLATION=context`, every slot's windows are on one display, so one slot opening a window can take focus from another slot's page (`document.hasFocus()` is then false there). A page that needs focus should not depend on it, or the slot should run with `BROWSERBAY_ISOLATION=process`, where each slot has its own browser and display.
+- A headless node has neither limit: every page renders.
+
 ## What watching costs
 
 Frames cost bandwidth through the node and the relay: about the frame size times the frame rate. Measured on loopback against a page that repaints every frame, which is the worst case, one watcher was about 60 frames per second at about 36 KB each, roughly 2 MB/s. A static page sends frames only when it repaints and costs far less.

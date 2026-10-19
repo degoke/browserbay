@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -12,7 +12,7 @@ test('node settings: the defaults, and each of the node’s own settings read fr
   const defaults = parseNodeSettings({})
   assert.equal(defaults.maxContexts, 5)
   assert.equal(defaults.drainSeconds, 120)
-  assert.equal(defaults.headless, true)
+  assert.equal(defaults.hideWebdriver, true)
   assert.equal(defaults.sandbox, false)
   assert.equal(defaults.profileDir, undefined, 'a fresh temporary profile unless one is named')
   assert.ok(defaults.nodeId, 'the hostname names a node that has no name')
@@ -31,7 +31,8 @@ test('node settings: the defaults, and each of the node’s own settings read fr
     maxContexts: 8,
     drainSeconds: 30,
     profileDir: '/data/profile',
-    headless: false,
+    display: 'host',
+    hideWebdriver: true,
     sandbox: true,
     isolation: 'process'
   })
@@ -40,6 +41,26 @@ test('node settings: the defaults, and each of the node’s own settings read fr
   for (const value of ['Process', 'vm', 'per-slot']) {
     assert.throws(() => parseNodeSettings({ BROWSERBAY_ISOLATION: value }), /BROWSERBAY_ISOLATION must be/, value)
   }
+})
+
+test('node settings: BROWSERBAY_HEADLESS picks the display, BROWSERBAY_WEBDRIVER_FLAG whether webdriver is hidden', () => {
+  for (const [value, display] of [
+    ['true', 'headless'],
+    ['false', 'host'],
+    ['xvfb', 'xvfb'],
+    ['XVFB', 'xvfb'],
+    ['', 'headless'],
+    ['  ', 'headless']
+  ] as const) {
+    assert.equal(parseNodeSettings({ BROWSERBAY_HEADLESS: value }).display, display, JSON.stringify(value))
+  }
+  for (const value of ['yes', '1', 'xvfb-run', 'constructor', 'toString']) {
+    assert.throws(() => parseNodeSettings({ BROWSERBAY_HEADLESS: value }), /BROWSERBAY_HEADLESS must be/, value)
+  }
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'keep' }).hideWebdriver, false)
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'hide' }).hideWebdriver, true)
+  assert.equal(parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: '' }).hideWebdriver, true, 'empty is not set')
+  assert.throws(() => parseNodeSettings({ BROWSERBAY_WEBDRIVER_FLAG: 'off' }), /BROWSERBAY_WEBDRIVER_FLAG must be/)
 })
 
 test('node settings: what the relay would refuse is refused here, at startup, with the setting named', () => {
@@ -150,5 +171,34 @@ test('starting a node refuses, before anything is launched, what the operator ha
     }
   } finally {
     await rm(empty, { recursive: true, force: true })
+  }
+})
+
+test('a node on xvfb refuses to start when Xvfb cannot run, in either isolation mode, and leaves nothing behind', async () => {
+  // A temporary directory of its own, so what is left in it can only be this node's (other test files run alongside).
+  const scratch = await mkdtemp(join(tmpdir(), 'browserbay-scratch-'))
+  const saved = process.env.TMPDIR
+  process.env.TMPDIR = scratch
+  try {
+    for (const isolation of ['context', 'process'] as const) {
+      await assert.rejects(
+        startBrowserNode({
+          relayUrl: 'https://relay.example.com',
+          enrollmentSecret: SECRET,
+          nodeId: 'n',
+          isolation,
+          display: 'xvfb',
+          executable: process.execPath,
+          xvfb: { executable: join(scratch, 'no-such-xvfb') }
+        }),
+        (error) => error instanceof ConfigError && /Xvfb was not found/.test(error.message),
+        isolation
+      )
+    }
+    assert.deepEqual(await readdir(scratch), [], 'neither a profile nor a display directory is left behind')
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = saved
+    await rm(scratch, { recursive: true, force: true })
   }
 })

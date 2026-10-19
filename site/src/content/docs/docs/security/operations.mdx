@@ -27,6 +27,17 @@ description: What happens when things fail, and how to stop, upgrade and watch a
 
 A node that cannot join the relay says why: an unreachable address, a wrong secret, an invalid id or slot count, or a duplicate id. It keeps trying.
 
+## A read-only root filesystem
+
+You can run the box with a read-only root filesystem, which is a sensible thing to ask of a container that holds browsers. It is not how the image runs by default, and it needs one setting: Chromium's crash reporter wants a writable `HOME`, and without one the browser exits at start-up (the node then says "The DevTools pipe closed"). Give it one, with a scratch directory mounted there:
+
+```sh
+docker run -d --read-only --tmpfs /tmp -e HOME=/tmp \
+  -e BROWSERBAY_API_KEY ghcr.io/degoke/browserbay
+```
+
+The profile of each browser, and (with the image's default `BROWSERBAY_HEADLESS=xvfb`) the virtual display's socket and its private cookie file, are made under `/tmp`, so `/tmp` is the one place that has to be writable. In Kubernetes the chart already mounts a scratch volume at `/tmp` (`node.tmpVolume`). If you add `readOnlyRootFilesystem: true` to the chart's `securityContext`, also set `HOME=/tmp` for the nodes through `node.extraEnv`.
+
 ## Capacity and bandwidth
 
 Size `BROWSERBAY_MAX_CONTEXTS` to the machine's memory and measure with your own pages. The default is 5 per node.

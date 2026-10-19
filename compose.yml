@@ -21,6 +21,9 @@ services:
       BROWSERBAY_API_KEYS: ${BROWSERBAY_API_KEYS:-}
       BROWSERBAY_MAX_CONTEXTS: ${BROWSERBAY_MAX_CONTEXTS:-5}
       BROWSERBAY_ISOLATION: ${BROWSERBAY_ISOLATION:-context}
+      # xvfb: a headful Chromium on a virtual display, which has no HeadlessChrome in its user agent (about 150 MB more memory).
+      # true: headless. An empty value means headless too, so the default is spelled out here.
+      BROWSERBAY_HEADLESS: ${BROWSERBAY_HEADLESS:-xvfb}
       # Optional: lets nodes on other machines join (`name:sha256` entries; see the README). Needs the port published
       # beyond this machine, behind HTTPS.
       BROWSERBAY_ENROLLMENT_SECRETS: ${BROWSERBAY_ENROLLMENT_SECRETS:-}

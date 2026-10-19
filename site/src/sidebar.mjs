@@ -13,6 +13,7 @@ export const sidebar = [
     items: [
       { label: 'Drive a browser', slug: 'docs/guides/drive-a-browser' },
       { label: 'Live view', slug: 'docs/guides/live-view' },
+      { label: 'Avoid bot blocks', slug: 'docs/guides/avoid-bot-blocks' },
       { label: 'Hand off and clean up', slug: 'docs/guides/hand-off' },
       { label: 'Share one box', slug: 'docs/guides/share-a-box' }
     ]

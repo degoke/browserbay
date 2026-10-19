@@ -43,6 +43,8 @@ pnpm test:browser
 
 The first launch can take 20 seconds or more on macOS. See the README's Development section for the details.
 
+CI runs these twice: headless, and headful on a virtual display (the image's default). On Linux with Xvfb installed, run the second with `BROWSERBAY_HEADLESS=xvfb pnpm test:browser`. On a Mac, run a Linux container: the cases that need Xvfb are skipped there, not failed.
+
 ### The scope hub needs extra care
 
 `src/node/scope.ts` is what keeps one slot away from another. When you change it:

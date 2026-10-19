@@ -11,8 +11,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import { WebSocket } from 'ws'
+import { startXvfb } from '../src/node/xvfb.js'
 
 export const enabled = process.env.PLAYWRIGHT_BROWSER_TESTS === '1'
+
+/**
+ * The display the whole suite runs on: BROWSERBAY_HEADLESS=xvfb runs every node, and the Chromium of launchChromium, headful
+ * on a virtual display, which is what the image ships. CI runs the suite once each way. The nodes the tests start are
+ * child processes that inherit the variable.
+ */
+export const xvfb = process.env.BROWSERBAY_HEADLESS === 'xvfb'
 
 /**
  * Removes a Chromium profile. A killed Chromium's helper processes (GPU, renderers) can still be writing into it for a
@@ -96,19 +104,20 @@ export function rawSocket(url: string, headers: Record<string, string> = {}) {
 /** A plain Chromium with a DevTools port on loopback: what a node wraps, for tests that drive the scope hub directly. */
 export async function launchChromium() {
   const profile = await mkdtemp(join(tmpdir(), 'browserbay-test-'))
+  const display = xvfb ? await startXvfb() : undefined
   const child: ChildProcess = spawn(
     chromium.executablePath(),
     [
       '--remote-debugging-port=0',
       `--user-data-dir=${profile}`,
-      '--headless=new',
+      ...(display ? ['--ozone-platform=x11'] : ['--headless=new']),
       '--no-sandbox',
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-background-networking',
       'about:blank'
     ],
-    { stdio: 'ignore' }
+    { stdio: 'ignore', env: display ? { ...process.env, ...display.env } : process.env }
   )
   const stop = async () => {
     if (child.exitCode === null && child.signalCode === null) {
@@ -116,6 +125,7 @@ export async function launchChromium() {
       child.kill('SIGKILL')
       await exited
     }
+    await display?.close()
     await removeProfile(profile)
   }
   // Chromium picks its own free port and writes it, then the browser's DevTools path, to DevToolsActivePort.

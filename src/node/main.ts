@@ -16,7 +16,12 @@
  *                                            'process': a Chromium per slot (more memory, stronger isolation, and a
  *                                            slot's client gets page.pdf(), tracing and browser.newContext())
  *   BROWSERBAY_CHROMIUM_SANDBOX              'true' keeps Chromium's own sandbox on (needs user namespaces)
- *   BROWSERBAY_HEADLESS                      'false' for a headful browser (needs a display)
+ *   BROWSERBAY_HEADLESS                      'true' (default): no display, `--headless=new`. 'xvfb': a headful browser on
+ *                                            a virtual display the node starts (the image's default; needs Xvfb, and
+ *                                            drops the HeadlessChrome user agent). 'false': a headful browser on the
+ *                                            display the environment names (DISPLAY)
+ *   BROWSERBAY_WEBDRIVER_FLAG                'hide' (default) turns navigator.webdriver off, which driving a browser over
+ *                                            DevTools would otherwise turn on; 'keep' leaves it on
  *   BROWSERBAY_PROFILE_DIR                   Chromium's profile (default: a fresh temporary directory); with
  *                                            BROWSERBAY_ISOLATION=process, where each slot's profile is made
  *   BROWSERBAY_CHROMIUM_EXECUTABLE           a Chromium other than the one in the image
@@ -30,13 +35,15 @@ import { errorMessage } from '../errors.js'
 import { NODE_LIMITS } from '../protocol.js'
 import type { AgentLogger } from './agent.js'
 import { ConfigError, startBrowserNode, type BrowserNode, type Isolation } from './browser-node.js'
+import type { Display } from './chromium.js'
 
 export interface NodeSettings {
   nodeId: string
   maxContexts: number
   drainSeconds: number
   profileDir: string | undefined
-  headless: boolean
+  display: Display
+  hideWebdriver: boolean
   sandbox: boolean
   isolation: Isolation
 }
@@ -67,13 +74,22 @@ export function parseNodeSettings(env: NodeJS.ProcessEnv = process.env): NodeSet
   if (isolation !== 'context' && isolation !== 'process') {
     throw new Error('BROWSERBAY_ISOLATION must be "context" or "process".')
   }
+  const displayText = (env.BROWSERBAY_HEADLESS ?? '').trim().toLowerCase() || 'true'
+  if (displayText !== 'true' && displayText !== 'false' && displayText !== 'xvfb') {
+    throw new Error('BROWSERBAY_HEADLESS must be "true", "false" or "xvfb".')
+  }
+  const display: Display = displayText === 'true' ? 'headless' : displayText === 'false' ? 'host' : 'xvfb'
+  const webdriver = (env.BROWSERBAY_WEBDRIVER_FLAG ?? '').trim().toLowerCase() || 'hide'
+  if (webdriver !== 'hide' && webdriver !== 'keep')
+    throw new Error('BROWSERBAY_WEBDRIVER_FLAG must be "hide" or "keep".')
   return {
     nodeId,
     maxContexts,
     drainSeconds,
     isolation,
     profileDir: env.BROWSERBAY_PROFILE_DIR || undefined,
-    headless: env.BROWSERBAY_HEADLESS !== 'false',
+    display,
+    hideWebdriver: webdriver === 'hide',
     sandbox: env.BROWSERBAY_CHROMIUM_SANDBOX === 'true'
   }
 }

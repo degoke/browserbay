@@ -81,7 +81,71 @@ test('chromium command line: DevTools on a pipe, no port; sandbox and headless a
   assert.equal(args.at(-1), 'about:blank')
 
   assert.ok(!chromiumArgs({ profileDir: '/p', sandbox: true }).includes('--no-sandbox'))
-  assert.ok(!chromiumArgs({ profileDir: '/p', headless: false }).some((arg) => arg.startsWith('--headless')))
+  for (const display of ['host', 'xvfb'] as const) {
+    assert.ok(!chromiumArgs({ profileDir: '/p', display }).some((arg) => arg.startsWith('--headless')), display)
+  }
+})
+
+test('chromium command line: what each display mode asks for', () => {
+  const headless = chromiumArgs({ profileDir: '/p', display: 'headless' })
+  assert.ok(headless.includes('--screen-info={1920x1080}'), 'a headless screen is not 800x600 inside a bigger window')
+  assert.ok(
+    !headless.includes('--disable-renderer-backgrounding'),
+    'every headless page renders: nothing to keep awake'
+  )
+  assert.ok(!headless.includes('--ozone-platform=x11'))
+
+  const xvfb = chromiumArgs({ profileDir: '/p', display: 'xvfb' })
+  assert.ok(!xvfb.some((arg) => arg.startsWith('--screen-info')), 'a real (virtual) display has its own size')
+  assert.ok(xvfb.includes('--ozone-platform=x11'), 'the virtual display, never the host compositor')
+  for (const flag of [
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows'
+  ]) {
+    assert.ok(xvfb.includes(flag), `a headful tab that is not in front keeps painting: ${flag}`)
+  }
+
+  assert.ok(
+    xvfb.includes('--enable-unsafe-swiftshader'),
+    'a headful Chromium with no GPU has no WebGL at all without the software renderer'
+  )
+  assert.ok(!headless.includes('--enable-unsafe-swiftshader'), 'a headless one has software WebGL already')
+
+  const host = chromiumArgs({ profileDir: '/p', display: 'host' })
+  assert.ok(host.includes('--disable-renderer-backgrounding'))
+  assert.ok(!host.includes('--enable-unsafe-swiftshader'), 'on the host’s own display software GL is the host’s call')
+  assert.ok(!host.includes('--ozone-platform=x11'), 'on the host’s own display it is the host’s call')
+})
+
+test('chromium command line: navigator.webdriver is turned off unless the operator asks to keep it', () => {
+  for (const display of ['headless', 'host', 'xvfb'] as const) {
+    assert.ok(
+      chromiumArgs({ profileDir: '/p', display }).includes('--disable-blink-features=AutomationControlled'),
+      display
+    )
+    assert.ok(
+      !chromiumArgs({ profileDir: '/p', display, hideWebdriver: false }).some((arg) =>
+        arg.startsWith('--disable-blink-features')
+      ),
+      display
+    )
+  }
+  assert.ok(
+    !chromiumArgs({ profileDir: '/p' }).some((arg) => arg.startsWith('--user-agent')),
+    'the user agent is never faked'
+  )
+})
+
+test('chromium environment: a virtual display replaces the node’s own and drops the Wayland socket', () => {
+  const env = { PATH: '/bin', DISPLAY: ':0', WAYLAND_DISPLAY: 'wayland-0', XAUTHORITY: '/home/me/.Xauthority' }
+  assert.deepEqual(chromiumEnv(env), env, 'without a virtual display the node’s own is what the browser gets')
+  assert.deepEqual(chromiumEnv(env, { DISPLAY: ':7', XAUTHORITY: '/tmp/x/Xauthority' }), {
+    PATH: '/bin',
+    DISPLAY: ':7',
+    XAUTHORITY: '/tmp/x/Xauthority'
+  })
+  assert.ok(!('WAYLAND_DISPLAY' in chromiumEnv({ WAYLAND_DISPLAY: 'wayland-0' }, { DISPLAY: ':7', XAUTHORITY: '/x' })))
 })
 
 test('finding Chromium: an explicit path wins, then the image’s Playwright directory', async () => {

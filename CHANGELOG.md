@@ -4,8 +4,21 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- **A browser that does not announce itself.** A headless Chromium says `HeadlessChrome` in its user agent and client hints, has a screen smaller than its window, and (driven over DevTools) has `navigator.webdriver` on. Slots no longer do any of that unasked. The image now runs Chromium headful on a virtual display that the node starts (`BROWSERBAY_HEADLESS=xvfb`, the default of the image and of the Helm chart: `node.headless`), so there is no `HeadlessChrome` to hide. The display is closed to everything but the browser (an Xvfb with a cookie file only the node can read, over a local socket), and with `BROWSERBAY_ISOLATION=process` each slot gets a display of its own, so slots share neither a clipboard nor a crash. Nothing is faked: the user agent, WebGL and canvas are left as the browser reports them.
+- **`BROWSERBAY_WEBDRIVER_FLAG`** (`hide`, the default, or `keep`). Chromium is started with `--disable-blink-features=AutomationControlled`, so `navigator.webdriver` is `false`. `keep` leaves it on, for a browser that should say what it is.
+- **`scripts/smoke-box.mjs`**, a dependency-free check that takes a slot of a running box and fails if its browser says `HeadlessChrome`, has `navigator.webdriver` on, or has a screen smaller than its window. CI runs it against the image it builds, as the chart runs it (an unprivileged user, a read-only root, no capabilities).
+- **A guide, [Avoid bot blocks](https://browserbay.3adelabs.com/docs/guides/avoid-bot-blocks/)**, on what a site sees, what the box fixes by itself and what is left for you.
+
 ### Changed
 
+- **Upgrading the image makes nodes headful.** A node uses about 150 MB more memory (about 65 MB for Chromium and 80 MB for the display), and with `BROWSERBAY_ISOLATION=process` about that much more per slot. Set `BROWSERBAY_HEADLESS=true` (`node.headless=true` in the chart) to stay headless. Outside the image the default is still `true`: a node asks for Xvfb only when told to, and says so at startup if it is missing.
+- **`BROWSERBAY_HEADLESS` is checked.** It takes `true`, `false` or `xvfb`; any other value stops the node at startup. Before, anything but `false` meant headless.
+- **A headless Chromium's screen is 1920×1080** (it was 800×600, inside a 1280×900 window), and every Chromium starts with `--password-store=basic`. A headful one is started with the flags that keep a tab that is not in front painting and its timers running, and, on the virtual display, may use software WebGL (without it a headful Chromium with no GPU has none at all). See [Watching a headful node](https://browserbay.3adelabs.com/docs/guides/live-view/#watching-a-headful-node).
+- **A slot whose display dies is reported as that**, not as the browser that went with it.
+- **The docs say how to run the box with a read-only root filesystem.** It needs `HOME` pointed at a writable directory (and `/tmp` writable), because Chromium's crash reporter exits at start-up without one. That was already true of earlier images; it is now written down and checked: the image was run read-only with `HOME=/tmp` and its slot's browser passes the same check as without.
+- **The browser tests run twice in CI,** headless and on a virtual display (set `BROWSERBAY_HEADLESS=xvfb` to run them that way locally).
 - **The docs now cover a `BROWSERBAY_API_KEYS` entry for a key you already have**: how to hash it (with `printf %s`, not `echo`, whose newline changes the hash), what each field of the entry is, and that the relay cannot check the strength of a key it only holds a hash of. The README and the configuration page both have it, and the CLI reference points to it.
 
 ## [0.2.2] - 2026-10-14

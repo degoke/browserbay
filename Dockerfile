@@ -59,11 +59,16 @@ RUN mkdir /tmp/pw && cd /tmp/pw \
   && npx playwright install --with-deps chromium \
   && rm -rf /ms-playwright/ffmpeg-* /ms-playwright/chromium_headless_shell-* /tmp/pw /var/lib/apt/lists/* /root/.npm
 
-# A failed download must fail the build, not ship a browser-less image.
-RUN test -n "$(find /ms-playwright -maxdepth 3 -name chrome -type f | head -1)"
+# A failed download must fail the build, not ship a browser-less image. The same goes for the virtual display: `--with-deps`
+# installs Xvfb along with Chromium's libraries, and a node on `xvfb` (the default below) does not start without it.
+RUN test -n "$(find /ms-playwright -maxdepth 3 -name chrome -type f | head -1)" && command -v Xvfb
 
 ENV NODE_ENV=production
 ENV PORT=8788
+# A headful Chromium on a virtual display the node starts, in place of headless mode: it has no `HeadlessChrome` in its
+# user agent and none of the other things headless mode announces. `docker run -e BROWSERBAY_HEADLESS=true` switches it off,
+# for about 150 MB less memory per node.
+ENV BROWSERBAY_HEADLESS=xvfb
 WORKDIR /app
 COPY --from=app --chown=node:node /app ./
 USER node

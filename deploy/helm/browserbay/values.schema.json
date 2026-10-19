@@ -82,7 +82,7 @@
         "drainSeconds": { "$ref": "#/definitions/count" },
         "minReadySeconds": { "$ref": "#/definitions/count" },
         "sandbox": { "type": "boolean" },
-        "headless": { "type": "boolean" },
+        "headless": { "enum": [true, false, "true", "false", "xvfb"] },
         "resources": { "type": "object" },
         "tmpVolume": {
           "type": "object",

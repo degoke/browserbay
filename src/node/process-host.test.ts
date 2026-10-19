@@ -62,6 +62,37 @@ function fakeLauncher({ silent = false, dieOnStart = false } = {}) {
 
 const host = (launcher: ReturnType<typeof fakeLauncher>, options: Partial<ProcessHostOptions> = {}) =>
   createProcessHost({ executable: '/chromium', spawnChromium: launcher.spawnChromium, stopGraceMs: 50, ...options })
+
+/** An "Xvfb" for the host to start: it reports a display number on fd 3, as the real one does, and can be made to die. */
+function fakeXvfb({ failToStart = false } = {}) {
+  const started: Array<{ args: string[]; display: string; signals: string[]; die(signal?: NodeJS.Signals): void }> = []
+  let next = 10
+  const spawnXvfb = ((_exe: string, args: string[]) => {
+    const child: any = new EventEmitter()
+    const report = new PassThrough()
+    child.stdio = [null, null, new PassThrough(), report]
+    child.stderr = child.stdio[2]
+    child.exitCode = null
+    child.signalCode = null
+    const signals: string[] = []
+    const die = (signal: NodeJS.Signals | null = 'SIGKILL') => {
+      if (child.signalCode || child.exitCode !== null) return
+      child.signalCode = signal
+      child.emit('exit', null, signal)
+    }
+    child.kill = (signal: string) => {
+      signals.push(signal)
+      queueMicrotask(() => die(signal as NodeJS.Signals))
+      return true
+    }
+    const number = next++
+    started.push({ args, display: `:${number}`, signals, die })
+    if (failToStart) setImmediate(() => die('SIGABRT'))
+    else queueMicrotask(() => report.write(`${number}\n`))
+    return child
+  }) as unknown as NonNullable<ProcessHostOptions['xvfb']>['spawnXvfb']
+  return { options: { executable: 'Xvfb', spawnXvfb }, started }
+}
 const until = async (condition: () => boolean, what: string) => {
   for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10))
   assert.ok(condition(), `timed out waiting for ${what}`)
@@ -69,7 +100,7 @@ const until = async (condition: () => boolean, what: string) => {
 
 test('process host: every slot gets its own browser and profile, started with the node’s fenced environment', async () => {
   const launcher = fakeLauncher()
-  const processes = host(launcher, { headless: true })
+  const processes = host(launcher, { display: 'headless' })
   process.env.BROWSERBAY_API_KEY_FOR_TEST = 'secret'
   try {
     await processes.createRun('s1')
@@ -247,5 +278,104 @@ test('process host: profiles a killed node left under its root are removed, and 
     await removeStaleProfiles(join(root, 'missing')) // a root that does not exist yet is fine
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('process host: on xvfb every slot gets a display of its own, and a browser that sees only that one', async () => {
+  const saved = { DISPLAY: process.env.DISPLAY, WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY }
+  process.env.DISPLAY = ':0'
+  process.env.WAYLAND_DISPLAY = 'wayland-0'
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    assert.equal(displays.started.length, 2, 'a display each: clipboards and crashes are not shared')
+    const [one, two] = launcher.started
+    assert.equal(one!.env.DISPLAY, displays.started[0]!.display)
+    assert.equal(two!.env.DISPLAY, displays.started[1]!.display)
+    assert.notEqual(one!.env.DISPLAY, two!.env.DISPLAY)
+    assert.match(String(one!.env.XAUTHORITY), /Xauthority$/, 'the browser is given the cookie file')
+    assert.notEqual(one!.env.XAUTHORITY, two!.env.XAUTHORITY)
+    assert.ok(!('WAYLAND_DISPLAY' in one!.env), 'never the host compositor')
+    assert.ok(one!.args.includes('--ozone-platform=x11'))
+    assert.ok(!one!.args.some((arg) => arg.startsWith('--headless')))
+  } finally {
+    await processes.close()
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+})
+
+test('process host: releasing a slot ends its display and no other slot’s', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    await processes.disposeRun('s1')
+    const [first, second] = displays.started
+    assert.deepEqual(first!.signals, ['SIGTERM'], 'its display is stopped with its browser')
+    assert.deepEqual(second!.signals, [], 'the other slot’s display is left alone')
+  } finally {
+    await processes.close()
+  }
+  assert.deepEqual(displays.started[1]!.signals, ['SIGTERM'], 'closing the host stops the rest')
+})
+
+test('process host: a display that dies takes only its slot’s browser with it, and the node is told', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'xvfb', xvfb: displays.options })
+  const ended: Array<[string, string]> = []
+  processes.onRunEnded((runKey, reason) => ended.push([runKey, reason]))
+  try {
+    await processes.createRun('s1')
+    await processes.createRun('s2')
+    displays.started[0]!.die('SIGSEGV')
+    await until(() => ended.length === 1, 'the slot to be reported ended')
+    assert.equal(ended[0]![0], 's1')
+    assert.match(ended[0]![1], /its browser ended \(Xvfb exited \(SIGSEGV\)\)/)
+    assert.deepEqual(launcher.started[0]!.signals, ['SIGKILL'], 'a browser cannot outlive its display')
+    assert.deepEqual(launcher.started[1]!.signals, [], 'the other slot carries on')
+    assert.equal(processes.size(), 1)
+  } finally {
+    await processes.close()
+  }
+})
+
+test('process host: a display that cannot start fails the create without starting a browser or leaving a profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'browserbay-root-'))
+  const launcher = fakeLauncher()
+  const processes = host(launcher, {
+    display: 'xvfb',
+    xvfb: fakeXvfb({ failToStart: true }).options,
+    profileRoot: root
+  })
+  try {
+    await assert.rejects(processes.createRun('s1'), /Xvfb exited \(SIGABRT\) before it was ready/)
+    assert.equal(launcher.started.length, 0, 'no browser without a display')
+    assert.ok(!existsSync(join(root, 's1')), 'the profile made for it is removed')
+    assert.equal(processes.size(), 0)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('process host: headless slots start no display and their browser keeps the node’s own', async () => {
+  const launcher = fakeLauncher()
+  const displays = fakeXvfb()
+  const processes = host(launcher, { display: 'headless', xvfb: displays.options })
+  try {
+    await processes.createRun('s1')
+    assert.equal(displays.started.length, 0)
+    assert.ok(launcher.started[0]!.args.includes('--headless=new'))
+    assert.ok(launcher.started[0]!.args.includes('--screen-info={1920x1080}'))
+  } finally {
+    await processes.close()
   }
 })

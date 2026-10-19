@@ -27,9 +27,16 @@ jobs:
       # the package, packed and installed into an empty project, works (what a user gets from npm)
       - run: pnpm check:package
 
-  # The same paths against real Chromium, then the whole box as processes. The hub's isolation tests live here.
+  # The same paths against real Chromium, then the whole box as processes. The hub's isolation tests live here. Run once
+  # headless and once headful on a virtual display (BROWSERBAY_HEADLESS), which is what the image ships.
   browser:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        display: [headless, xvfb]
+    env:
+      BROWSERBAY_HEADLESS: ${{ matrix.display == 'xvfb' && 'xvfb' || 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -145,6 +152,19 @@ jobs:
         with:
           context: .
           target: box
+          load: true
           tags: browserbay:ci
           cache-from: type=gha,scope=box
           cache-to: type=gha,mode=max,scope=box
+      # As the chart runs it: an unprivileged user, a scratch /tmp and no capabilities. A browser on a virtual display must
+      # start there, and a page must not see a HeadlessChrome. (A read-only root also works, with HOME pointed at a writable
+      # directory: Chromium's crash reporter wants one. See "Operations" in the docs.)
+      - name: The box image starts, and a slot's browser does not announce itself
+        run: |
+          docker run -d --name box --user 1000 --tmpfs /tmp --cap-drop ALL \
+            -p 8789:8788 -e BROWSERBAY_API_KEY=ci-api-key-0123456789 browserbay:ci
+          for i in $(seq 1 30); do
+            curl -fs -H 'authorization: Bearer ci-api-key-0123456789' http://localhost:8789/v1/nodes | grep -q nodeId && break
+            sleep 1
+          done
+          node scripts/smoke-box.mjs http://localhost:8789 ci-api-key-0123456789 || { docker logs box; exit 1; }

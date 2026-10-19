@@ -99,7 +99,11 @@ node:
   minReadySeconds: 30
   # true keeps Chromium's own sandbox on. It needs user namespaces, which most clusters do not give a container.
   sandbox: false
-  headless: true
+  # How the browser is displayed. "xvfb" (the default) runs it headful on a virtual display the node starts: a headful
+  # Chromium has no HeadlessChrome in its user agent. It costs about 150 MB more per node (a display, and a little more
+  # for Chromium), and with isolation per process about that much more per slot. true: headless, with no display.
+  # false: headful on the pod's own display, which a container does not have.
+  headless: xvfb
 
   resources:
     requests:

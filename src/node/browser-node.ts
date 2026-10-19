@@ -21,10 +21,11 @@ import type { Readable, Writable } from 'node:stream'
 import { errorMessage } from '../errors.js'
 import { ConfigError } from '../protocol.js'
 import { assertSecureRelayUrl, startAgent, type Agent, type AgentLogger } from './agent.js'
-import { chromiumArgs, chromiumEnv, findChromium } from './chromium.js'
+import { chromiumArgs, chromiumEnv, findChromium, type Display } from './chromium.js'
 import { createPipeUpstream } from './pipe-upstream.js'
 import { createProcessHost, removeStaleProfiles, type ProcessHost } from './process-host.js'
 import { createCdpScope } from './scope.js'
+import { startXvfb, type Xvfb, type XvfbOptions } from './xvfb.js'
 
 export { ConfigError }
 
@@ -48,7 +49,15 @@ export interface BrowserNodeOptions {
    */
   profileDir?: string
   isolation?: Isolation
-  headless?: boolean
+  /**
+   * How the browser is displayed (default `headless`). `xvfb` starts a virtual display for it: one for the shared Chromium,
+   * or, with process isolation, one per slot (a display is where the clipboard lives, so slots must not share one).
+   */
+  display?: Display
+  /** Turn `navigator.webdriver` off, which driving a browser over DevTools would turn on (default true). */
+  hideWebdriver?: boolean
+  /** For tests: how Xvfb is found and started. */
+  xvfb?: XvfbOptions
   /** Keep Chromium's own sandbox on (needs user namespaces). */
   sandbox?: boolean
   /** Defaults to the Chromium in the image (or BROWSERBAY_CHROMIUM_EXECUTABLE). */
@@ -77,7 +86,8 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
     enrollmentSecret,
     nodeId,
     maxContexts = 5,
-    headless = true,
+    display = 'headless',
+    hideWebdriver = true,
     sandbox = false,
     isolation = 'context',
     logger = {}
@@ -103,18 +113,41 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
   const profileDir =
     isolation === 'context' ? (options.profileDir ?? (await mkdtemp(join(tmpdir(), 'browserbay-profile-')))) : ''
   if (isolation === 'process' && options.profileDir) await removeStaleProfiles(options.profileDir)
+
+  // The virtual display comes first: the shared Chromium needs it to start. With process isolation each slot makes its own,
+  // so one is started and stopped here only to find out now (and say so) if Xvfb cannot run, rather than at every slot.
+  let xvfb: Xvfb | undefined
+  if (display === 'xvfb') {
+    try {
+      const probe = await startXvfb(options.xvfb)
+      if (isolation === 'context') xvfb = probe
+      else await probe.close()
+    } catch (error) {
+      if (ownsProfile) await rm(profileDir, { recursive: true, force: true }).catch(() => undefined)
+      throw error
+    }
+  }
+
   const processHost: ProcessHost | undefined =
     isolation === 'process'
-      ? createProcessHost({ executable, headless, sandbox, profileRoot: options.profileDir, logger })
+      ? createProcessHost({
+          executable,
+          display,
+          hideWebdriver,
+          sandbox,
+          profileRoot: options.profileDir,
+          logger,
+          xvfb: options.xvfb
+        })
       : undefined
 
   // DevTools over a pipe (fds 3 and 4): no port, and no size limit on what a screenshot or an evaluate result may be.
   const chromium = processHost
     ? undefined
-    : spawn(executable, chromiumArgs({ profileDir, headless, sandbox }), {
+    : spawn(executable, chromiumArgs({ profileDir, display, sandbox, hideWebdriver }), {
         stdio: ['ignore', 'ignore', 'inherit', 'pipe', 'pipe'],
         // Not the node's own environment: it holds this box's secrets, and pages the browser runs are not trusted with them.
-        env: chromiumEnv()
+        env: chromiumEnv(process.env, xvfb?.env)
       })
 
   let agent: Agent | undefined
@@ -130,6 +163,7 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
     logger.info?.(`node stopping: ${reason}`)
     void agent?.close()
     const done = async () => {
+      await xvfb?.close()
       if (ownsProfile) await rm(profileDir, { recursive: true, force: true }).catch(() => undefined)
       finish({ reason, crashed })
     }
@@ -147,6 +181,8 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
 
   chromium?.on('exit', (code, signal) => void stop(`Chromium exited (${signal ?? code})`, true))
   chromium?.on('error', (error) => void stop(`Chromium could not start: ${error.message}`, true))
+  // A browser cannot outlive its display, and a node without one has nothing to give a slot.
+  void xvfb?.exited.then((why) => stop(`Xvfb ${why}`, true))
 
   try {
     if (processHost) {
