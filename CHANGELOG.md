@@ -4,6 +4,8 @@ All notable changes to browserbay are written here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
 ### Added
 
 - **A browser that does not announce itself.** A headless Chromium says `HeadlessChrome` in its user agent and client hints, has a screen smaller than its window, and (driven over DevTools) has `navigator.webdriver` on. Slots no longer do any of that unasked. The image now runs Chromium headful on a virtual display that the node starts (`BROWSERBAY_HEADLESS=xvfb`, the default of the image and of the Helm chart: `node.headless`), so there is no `HeadlessChrome` to hide. The display is closed to everything but the browser (an Xvfb with a cookie file only the node can read, over a local socket), and with `BROWSERBAY_ISOLATION=process` each slot gets a display of its own, so slots share neither a clipboard nor a crash. Nothing is faked: the user agent, WebGL and canvas are left as the browser reports them.
@@ -89,7 +91,8 @@ First release.
 - **Docker images**, `ghcr.io/degoke/browserbay` (Chromium included) and `ghcr.io/degoke/browserbay-relay`, and a Compose file.
 - A protocol version check between the relay and its nodes.
 
-[Unreleased]: https://github.com/degoke/browserbay/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/degoke/browserbay/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/degoke/browserbay/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/degoke/browserbay/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/degoke/browserbay/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/degoke/browserbay/compare/v0.1.0...v0.2.0
