@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
+import { generateSigningKey, createRequestSigner } from '../web-bot-auth.js'
 import { createFakeChromium } from './fake-chromium.js'
 import { createProcessHost, removeStaleProfiles, type ProcessHostOptions } from './process-host.js'
 
@@ -519,4 +520,44 @@ test('process host: a proxied slot whose browser dies on its own loses its forwa
   } finally {
     await processes.close()
   }
+})
+
+// ---- signing ----------------------------------------------------------------------------------------------------------
+
+test('process host: a slot is signed when it asks or the node always signs, and the context is made with the signer', async () => {
+  const key = generateSigningKey()
+  const signing = (mode: 'optional' | 'always') => ({
+    mode,
+    signer: createRequestSigner({ key: key.privateJwk, agent: 'https://box.example.com' })
+  })
+
+  const launcher = fakeLauncher()
+  const optional = host(launcher, { signing: signing('optional') })
+  try {
+    await optional.createRun('plain')
+    await optional.createRun('signed', { signRequests: true })
+    // What signs is the hub: for a run made with a signer it attaches a session of its own to every tab and turns request
+    // interception on there (scope.test.ts has the detail). So, seen from the browser: open a tab in the slot's context, and ask
+    // whether the hub intercepted it.
+    const interceptsATab = async (browser: (typeof launcher.started)[number]) => {
+      const context = [...browser.fake.contexts.keys()].at(-1)!
+      browser.fake.createTarget({ url: 'about:blank', browserContextId: context })
+      await browser.fake.flush()
+      return browser.fake.commands('Fetch.enable').length > 0
+    }
+    assert.equal(await interceptsATab(launcher.started[0]!), false, 'a slot that did not ask is not intercepted')
+    assert.equal(await interceptsATab(launcher.started[1]!), true, 'one that asked is')
+  } finally {
+    await optional.close()
+  }
+
+  const always = host(fakeLauncher(), { signing: signing('always') })
+  await assert.rejects(always.createRun('s', { signRequests: false }), /cannot leave one unsigned/)
+  await always.close()
+
+  const off = fakeLauncher()
+  const none = host(off)
+  await assert.rejects(none.createRun('s', { signRequests: true }), /does not sign requests/)
+  assert.equal(off.started.length, 0, 'nothing was started for a slot that could not be made as asked')
+  await none.close()
 })

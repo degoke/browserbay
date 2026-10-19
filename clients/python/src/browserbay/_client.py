@@ -396,6 +396,7 @@ class BrowserBay:
         timezone: Optional[str] = None,
         locale: Optional[str] = None,
         node_labels: Optional[Sequence[str]] = None,
+        sign_requests: Optional[bool] = None,
     ) -> "Slot":
         """Takes a browser.
 
@@ -412,6 +413,9 @@ class BrowserBay:
         :param locale: The slot's browser language, such as ``de-DE``. Only a box whose nodes run
             ``BROWSERBAY_ISOLATION=process`` can.
         :param node_labels: Only place the slot on a node that carries every one of these labels.
+        :param sign_requests: Sign every request of the slot's browser (Web Bot Auth), so sites that know the box can tell
+            whose browser it is. ``True`` needs a node that signs and ``False`` one that can leave a slot unsigned; left
+            out (``None``), the node's own setting decides.
         :raises NoCapacityError: The box stayed full for the whole wait.
         :raises UnsupportedError: Options were asked for and the box cannot give them (no node can, or the box is older
             than the options). A browser made without them is released first.
@@ -451,6 +455,10 @@ class BrowserBay:
                 raise TypeError("node_labels must be a list of strings")
             if len(node_labels) > 0:
                 options["nodeLabels"] = list(node_labels)
+        if sign_requests is not None:
+            if not isinstance(sign_requests, bool):
+                raise TypeError("sign_requests must be True or False")
+            options["signRequests"] = sign_requests
         request: Dict[str, Any] = {"runId": full_run_id, "maxLifetimeSeconds": lifetime, "waitMs": wait, **options}
         # What was asked for is exactly the options: the plain fields are not among them, whatever is added to either part.
         asked = list(options)

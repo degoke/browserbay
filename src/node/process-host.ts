@@ -24,6 +24,8 @@ import { chromiumArgs, chromiumEnv, slotBrowser, type Display } from './chromium
 import { createPipeUpstream } from './pipe-upstream.js'
 import { runContext, startProxyForwarder, type ProxyForwarder, type ProxyForwarderOptions } from './proxy-forwarder.js'
 import { createCdpScope, type CdpScope, type RunHost, type ScopeLogger } from './scope.js'
+import type { RequestSigner } from '../web-bot-auth.js'
+import { signerFor, type SigningHost } from './signing.js'
 import { startXvfb, type Xvfb, type XvfbOptions } from './xvfb.js'
 
 /** The relay gives a node 15 s to confirm a new slot; a browser that is not up well before that is not worth waiting for. */
@@ -68,6 +70,8 @@ export interface ProcessHostOptions {
   xvfb?: XvfbOptions
   /** For tests: how a slot's proxy forwarder is started and what it may connect to. */
   forwarder?: ProxyForwarderOptions & { start?: typeof startProxyForwarder }
+  /** How this node signs requests, when it does. */
+  signing?: SigningHost
 }
 
 export interface ProcessHost extends Omit<RunHost, 'onRunEnded'> {
@@ -134,15 +138,17 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
     if (asked.value.timezone && existsSync(ZONEINFO) && !existsSync(join(ZONEINFO, asked.value.timezone))) {
       throw new SlotRefusedError('This node does not have that time zone')
     }
+    // Whether the slot is signed is decided before anything is started, so a slot that cannot be made as asked leaves nothing.
+    const signer = signerFor(asked.value, options.signing)
     creating.add(runKey)
     try {
-      return await startSlot(runKey, asked.value)
+      return await startSlot(runKey, asked.value, signer)
     } finally {
       creating.delete(runKey)
     }
   }
 
-  async function startSlot(runKey: string, requested: SlotOptions) {
+  async function startSlot(runKey: string, requested: SlotOptions, signer: RequestSigner | undefined) {
     const profileDir = await makeProfileDir(runKey)
     const began = Date.now()
     let xvfb: Xvfb | undefined
@@ -229,7 +235,7 @@ export function createProcessHost(options: ProcessHostOptions): ProcessHost {
     let timer: NodeJS.Timeout | undefined
     try {
       await Promise.race([
-        scope.start().then(() => scope.createRun(runKey, runContext(forwarder, requested.proxy))),
+        scope.start().then(() => scope.createRun(runKey, runContext(forwarder, requested.proxy, signer))),
         new Promise<never>((_, reject) => {
           // Starting the display took part of the time the relay gives a slot.
           const left = Math.max(1000, startTimeoutMs - (Date.now() - began))

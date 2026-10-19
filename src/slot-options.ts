@@ -10,7 +10,7 @@ import { LABEL_LIMITS, NAME_PATTERN, NODE_FEATURE, type ProxySettings, type Slot
 import { isForbiddenProxyHost, parseProxyServer } from './proxy-address.js'
 
 /**
- * A node cannot make the slot as it was asked (a time zone it does not have). Its message says so to
+ * A node cannot make the slot as it was asked (a time zone it does not have, a signature it cannot give). Its message says so to
  * the person who asked, and never repeats a credential, so the agent passes it on in `context.failed` with `refused`.
  */
 export class SlotRefusedError extends Error {
@@ -26,7 +26,7 @@ const ok = <T>(value: T): Parsed<T> => ({ ok: true, value })
 const bad = (message: string): Parsed<never> => ({ ok: false, message })
 
 /** Every field of a slot request that is not the plain three, with the options a node acts on first. */
-export const OPTION_FIELDS = ['proxy', 'timezone', 'locale'] as const
+export const OPTION_FIELDS = ['proxy', 'timezone', 'locale', 'signRequests'] as const
 export const REQUEST_FIELDS = ['runId', 'maxLifetimeSeconds', 'waitMs', ...OPTION_FIELDS, 'nodeLabels'] as const
 
 /** A field name from the wire, safe to put in a message. */
@@ -152,6 +152,10 @@ export function parseSlotOptions(input: Record<string, unknown>): Parsed<SlotOpt
     if (!locale.ok) return locale
     options.locale = locale.value
   }
+  if (input.signRequests !== undefined) {
+    if (typeof input.signRequests !== 'boolean') return bad('signRequests must be true or false')
+    options.signRequests = input.signRequests
+  }
   return ok(options)
 }
 
@@ -173,6 +177,8 @@ export function featuresFor(options: SlotOptions): string[] {
   const features: string[] = []
   if (options.proxy) features.push(NODE_FEATURE.proxy)
   if (options.timezone !== undefined || options.locale !== undefined) features.push(NODE_FEATURE.locale)
+  if (options.signRequests === true) features.push(NODE_FEATURE.sign)
+  if (options.signRequests === false) features.push(NODE_FEATURE.unsigned)
   return features
 }
 

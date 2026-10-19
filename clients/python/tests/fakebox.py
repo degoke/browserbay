@@ -143,7 +143,7 @@ class FakeBox:
                 self.slots[slot_id] = slot
                 created: Dict[str, Any] = {"slotId": slot_id, "token": slot["token"], "nodeId": slot["nodeId"]}
                 if self.modern:
-                    created["applied"] = [n for n in ("proxy", "timezone", "locale", "nodeLabels") if n in body]
+                    created["applied"] = [n for n in ("proxy", "timezone", "locale", "nodeLabels", "signRequests") if n in body]
                 return reply(201, created)
 
             if path == "/v1/slots" and method == "GET":

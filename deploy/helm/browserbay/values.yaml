@@ -18,6 +18,30 @@ relayImage:
   tag: ''
   pullPolicy: IfNotPresent
 
+# Sign the browsers' requests, so sites that know this box can tell whose browsers they are (Web Bot Auth). Off by default.
+# It does not hide anything: a signed browser says plainly that it is a bot, and whose. See the "Avoid bot blocks" guide.
+#   mode: off        nothing is signed, and the relay publishes no key.
+#   mode: optional   only the slots that ask for it (acquire with signRequests: true) are signed.
+#   mode: always     every slot is signed, and a slot cannot ask to be left unsigned.
+# Make a key with `docker run --rm ghcr.io/degoke/browserbay web-bot-auth`.
+webBotAuth:
+  # (Quote it, or YAML reads a bare off as false. The chart accepts false as off, too.)
+  mode: 'off'
+  # Where this box says it is: the https address your relay is served at, with no path (for example
+  # https://browsers.example.com). Sites fetch the public key from <agentUrl>/.well-known/http-message-signatures-directory,
+  # which the relay serves, so this must reach the relay (relay.ingress).
+  agentUrl: ''
+  # `legacy` is the spelling Cloudflare's verifier accepts. `dictionary` is the IETF draft's.
+  format: legacy
+  # How long a signature is good for, in seconds (10 to 86400). Sites want it short.
+  ttlSeconds: 60
+  # The private key, as the JSON the command above prints. The chart keeps it in a Secret of its own. To manage the Secret yourself
+  # (recommended: do not put a private key in a values file), name it in existingSecret and leave key empty.
+  key: ''
+  existingSecret: ''
+  # The key in that Secret that holds the JSON (also the key the chart's own Secret uses).
+  existingSecretKey: webBotAuthKey
+
 imagePullSecrets: []
 nameOverride: ''
 fullnameOverride: ''

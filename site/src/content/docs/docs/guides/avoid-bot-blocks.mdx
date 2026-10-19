@@ -141,6 +141,39 @@ const slot = await box.acquire({
 
 The slot's `navigator.language`, `navigator.languages`, `Accept-Language` header and `Intl` time zone then say `de-DE` and `Europe/Berlin`. Match them to the proxy's country. A box whose nodes share one Chromium cannot do this per slot, and `acquire` throws `UnsupportedError` at once rather than make a slot in the wrong zone.
 
+## Identify your box to sites
+
+Everything above makes a browser look ordinary. This does the opposite, and for some sites it works better: the box **says who it is**. Sites and CDNs that block bots can also choose to let known ones in, and the way a bot makes itself known is to sign its requests ([Web Bot Auth](https://datatracker.ietf.org/doc/draft-ietf-webbotauth-httpsig-protocol/), built on HTTP Message Signatures, RFC 9421) with a key whose public half it publishes. The box can sign every request its browsers make.
+
+<Aside type="caution" title="It declares a bot, and whose">
+  A signed browser is not hidden: it tells every site that it is automated, and the address of the box that runs it. A
+  site that blocks all bots will block it by name. Use it for sites that have a way to say yes (Cloudflare's verified
+  bots, a partner's allowlist), and sign only the slots that need it.
+</Aside>
+
+**Set it up once.**
+
+1. **Make a key.** `docker run --rm ghcr.io/degoke/browserbay web-bot-auth` prints a private key and its id. It is shown once: keep it like a password.
+2. **Give the relay the key** (`BROWSERBAY_WEB_BOT_AUTH_KEY`), and serve the relay over HTTPS **at the root of its own hostname**, such as `https://browsers.example.com`. The relay then publishes the public key at `/.well-known/http-message-signatures-directory` on that host, where a site looks for it.
+3. **Give each node that signs** the key, the address, and a mode: `BROWSERBAY_WEB_BOT_AUTH=optional` (sign the slots that ask), `BROWSERBAY_WEB_BOT_AUTH_KEY`, and `BROWSERBAY_WEB_BOT_AUTH_AGENT=https://browsers.example.com`. In Kubernetes, set `webBotAuth.*` in the chart. `always` signs every slot instead.
+4. **Ask for it.** `acquire({ signRequests: true })` (`sign_requests=True`, `SignRequests: &yes`). A slot that asks is only placed on a node that signs with the key the relay publishes. One that does not ask is not signed, on an `optional` node.
+5. **Register with the site's verifier.** For Cloudflare, submit the directory address in its bot submission form with "Request Signature" as the verification method: its documentation is the reference, and the menu moves. Until a site knows your key, it sees a signed request from an unknown bot.
+
+Check what the relay publishes with `curl https://browsers.example.com/.well-known/http-message-signatures-directory`: it is a JWKS with your public key, and its `kid` is the id the command printed.
+
+**What is signed.** Every `http` and `https` request a signed slot's pages make, as it is made: navigations, images, scripts, `fetch` and XHR (including cross-origin ones, with no CORS preflight, because the headers are added after the browser's own check), each hop of a redirect (signed for the host it goes to), popups, frames (including ones in other processes) and requests from dedicated workers. This was measured against real Chromium. The repository's browser tests verify navigations, subresources, cross-origin requests, redirects, popups and frames with Cloudflare's own library, and its hub tests cover the frames that live in other processes.
+
+**What is not.**
+
+- **WebSocket handshakes** never pass through request interception, so they go unsigned.
+- **The first request of a tab opened with a URL** through `Target.createTarget({ url })`. The browser starts it before anything can attach. Playwright and Puppeteer open a blank tab and then navigate, which is signed; so are popups.
+- **Requests of workers inside frames from another site, and of service and shared workers.**
+- **A request your own interception changes after the box signed it.**
+
+**Adding headers of your own.** Use `context.setExtraHTTPHeaders({ ... })`. If you route requests, call `route.continue()` or `route.fallback()` without a `headers` option. A client that replaces a request's whole header set (`route.continue({ headers: { ...route.request().headers(), x: '1' } })`) wins over the box, and on a redirect Playwright hands back the previous hop's headers, so the second hop carries the first hop's signature, which is for another host and fails to verify.
+
+`BROWSERBAY_WEB_BOT_AUTH_FORMAT` chooses how `Signature-Agent` is written: `legacy` (the default) is the quoted string Cloudflare's verifier accepts, and `dictionary` is the IETF draft's. Cloudflare's rejected the draft's in October 2026. Signatures last 60 seconds by default (`BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS`).
+
 ## Keep a session between runs
 
 A site that has checked your browser once usually does not check it again for a while: it hands the browser a clearance cookie (`cf_clearance`, `datadome`, `_abck` and the like), and a signed-in session is a cookie too. Running the check again on every run is what makes a flow slow and flaky. So keep the session. The box adds nothing for this, because cookies are the slot's own and your driver already reaches them.
@@ -189,4 +222,5 @@ A clearance cookie is bound to what it was issued to, so it only works again whe
 - **WebGL reports a software renderer.** The image has no GPU, so a page reading the WebGL renderer sees SwiftShader. A node on a machine with a GPU does not.
 - **The time zone is UTC** unless you set one: [`timezone` and `locale`](#set-a-time-zone-and-language) on a node with a Chromium per slot, or `TZ` for a whole node.
 - **Behaviour.** A script that clicks at machine speed, never moves the mouse and loads fifty pages a second looks like a bot whatever the browser says.
+- **Sites that do not know you.** Signing only helps with a site that has a way to let a known bot in. Elsewhere it is a bot announcing itself.
 - **CAPTCHAs.** A CAPTCHA is a site asking for a person. browserbay does not solve them. A person can: see [Live view](/docs/guides/live-view/) and [Hand off and clean up](/docs/guides/hand-off/).

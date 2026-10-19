@@ -54,8 +54,18 @@ export const NODE_FEATURE = {
   /** `SlotOptions.proxy`: the slot's traffic goes through a proxy of its own. */
   proxy: 'proxy',
   /** `SlotOptions.timezone` and `locale`. Only a node with a Chromium per slot has it: they are set when the browser starts. */
-  locale: 'locale'
+  locale: 'locale',
+  /** The node can sign a slot's requests (Web Bot Auth): `SlotOptions.signRequests: true`. */
+  sign: 'sign',
+  /** The node can leave a slot's requests unsigned: `SlotOptions.signRequests: false`. A node that always signs does not have it. */
+  unsigned: 'unsigned'
 } as const
+
+/**
+ * What a node that signs says about its key: `wba-key:<key id>`. A relay that publishes a key directory only sends a slot that
+ * asks to be signed to a node signing with that key, because signatures made with another would not verify against it.
+ */
+export const SIGNING_KEY_FEATURE = 'wba-key:'
 
 /** What the relay accepts of a node's labels, and of the labels a slot requires. */
 export const LABEL_LIMITS = {
@@ -124,6 +134,11 @@ export interface CreateSlotRequest {
   locale?: string
   /** Only place the slot on a node that carries every one of these labels (`BROWSERBAY_NODE_LABELS`). */
   nodeLabels?: string[]
+  /**
+   * Sign every request of the slot's browser (Web Bot Auth), so sites that know the box can tell whose browser it is. `true` needs
+   * a node that signs, `false` one that can leave it unsigned, and left out is the node's own default (`BROWSERBAY_WEB_BOT_AUTH`).
+   */
+  signRequests?: boolean
 }
 
 /** A proxy for one slot. The node reaches it through a forwarder of its own, so Chromium never holds the credentials. */
@@ -141,6 +156,7 @@ export interface SlotOptions {
   proxy?: ProxySettings
   timezone?: string
   locale?: string
+  signRequests?: boolean
 }
 
 /**

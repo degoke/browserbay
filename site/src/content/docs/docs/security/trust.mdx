@@ -29,6 +29,15 @@ A slot can be given a proxy with a user name and password ([Avoid bot blocks](/d
 
 What it cannot do: a client with the slot token has control of the slot's browser, which goes out through the proxy. They can use the proxy as the slot does for as long as the slot lives. That is why the token is a credential too.
 
+## The signing key
+
+A box that signs its browsers' requests ([Identify your box to sites](/docs/guides/avoid-bot-blocks/#identify-your-box-to-sites)) holds a private key, and that changes what a node machine is worth stealing.
+
+- **The key is on the relay and on every node that signs,** home or office nodes included, in the process environment (`BROWSERBAY_WEB_BOT_AUTH_KEY`). Anyone who has it can sign requests as your box. Treat it like the enrollment secret: a Secret in Kubernetes, never in an image or a values file, and rotate it (make a new one, update the relay and the nodes together) if a machine that held it is lost.
+- **It never crosses the network.** Each machine is given it by its operator. The relay publishes only the public half, and the signatures a node makes are the only thing of it a site sees.
+- **A slot's client cannot ask the browser for it.** The browser is not given it, and the process environment passes to Chromium only what the allowlist says.
+- **It tells every site who you are.** The signatures name the box's address, so a site that logs them learns which box a request came from, and a declared bot can be blocked on sites that block all bots. Sign only the slots that need it (`optional` and `signRequests: true`), not every one.
+
 ## What it does not do
 
 The box limits what a client can _ask_ of the machine. It does not make a client harmless.

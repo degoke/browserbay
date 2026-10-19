@@ -563,6 +563,23 @@ test('what a slot asked for is sent to its node and kept nowhere in the registry
   assert.ok(!('options' in plain))
 })
 
+test('a feature is named in the way someone who asked for it would say it', async () => {
+  const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
+  const link = fakeLink(registry, 'n1')
+  registry.registerNode({ id: 'n1', maxContexts: 5, link: link.link, contexts: [] })
+  for (const [feature, expected] of [
+    ['sign', /No node offers request signing \(BROWSERBAY_WEB_BOT_AUTH\)/],
+    ['unsigned', /No node offers unsigned requests/],
+    ['wba-key:abc', /No node offers signing with the key this relay publishes/]
+  ] as const) {
+    await assert.rejects(
+      registry.allocate({ runId: 'r', maxLifetimeSeconds: 600, waitMs: 0, need: { features: [feature], labels: [] } }),
+      (error: Error) => error instanceof UnsupportedError && expected.test(error.message),
+      feature
+    )
+  }
+})
+
 test('a slot every capable node refuses is told why at once, and one a node merely could not make still waits', async () => {
   const registry = createNodeRegistry({ unsupportedGraceMs: 0 })
   const picky = fakeLink(registry, 'picky', 'refuse')

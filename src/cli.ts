@@ -11,6 +11,7 @@ const HELP = `browserbay: self-hosted browsers for AI agents and automation
   browserbay node      a browser node alone (dials out to a relay)
   browserbay secret    make an enrollment secret for a node, and the entry the relay needs for it
   browserbay key       make an API key (with a name, also the entry the relay needs: see BROWSERBAY_API_KEYS)
+  browserbay web-bot-auth   make the Ed25519 key a box signs its browsers' requests with (Web Bot Auth)
 
 Settings are environment variables; see the README.`
 
@@ -100,6 +101,20 @@ async function dispatch() {
     case 'key':
       makeKey(args)
       break
+    case 'web-bot-auth': {
+      // A key for a box to sign its browsers' requests with. It is a private key: shown here once, then kept like a password.
+      const { generateSigningKey, DIRECTORY_PATH } = await import('./web-bot-auth.js')
+      const made = generateSigningKey()
+      console.log(`Give the relay and every node that signs:  BROWSERBAY_WEB_BOT_AUTH_KEY='${made.privateJwk}'`)
+      console.log(`Its id, which is what a site looks the key up by:  ${made.keyid}`)
+      console.log('')
+      console.log('On each node that signs, say how and where the box says it is:')
+      console.log('  BROWSERBAY_WEB_BOT_AUTH=optional   (or "always": sign every slot, and not only the ones that ask)')
+      console.log('  BROWSERBAY_WEB_BOT_AUTH_AGENT=https://<the address your relay is served at>')
+      console.log('')
+      console.log(`The relay then publishes the public key at  https://<your relay>${DIRECTORY_PATH}`)
+      break
+    }
     case undefined:
     case 'help':
     case '--help':

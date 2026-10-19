@@ -224,12 +224,22 @@ export function createNodeRegistry(options: RegistryOptions = {}) {
     return !node.exclusive || need.labels.length > 0
   }
 
+  /** What a feature is called to the person who asked for it. */
+  const featureName = (feature: string) =>
+    feature === 'sign'
+      ? 'request signing (BROWSERBAY_WEB_BOT_AUTH)'
+      : feature === 'unsigned'
+        ? 'unsigned requests (a node set to always sign has none)'
+        : feature.startsWith('wba-key:')
+          ? 'signing with the key this relay publishes'
+          : feature
+
   /** Why no connected node serves a request, in a sentence. */
   function explainUnsupported(need: SlotNeeds) {
     const all = [...nodes.values()]
     const reasons: string[] = []
     const noFeature = need.features.filter((feature) => !all.some((node) => node.features.has(feature)))
-    if (noFeature.length > 0) reasons.push(`no node offers ${noFeature.join(', ')}`)
+    if (noFeature.length > 0) reasons.push(`no node offers ${noFeature.map(featureName).join(', ')}`)
     const noLabel = need.labels.filter((label) => !all.some((node) => node.labels.has(label)))
     if (noLabel.length > 0) reasons.push(`no node carries the label ${noLabel.join(', ')}`)
     if (reasons.length === 0) {

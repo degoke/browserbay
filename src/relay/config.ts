@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { ConfigError, NAME_PATTERN, quotaProblem } from '../protocol.js'
+import { parseSigningKey } from '../web-bot-auth.js'
 import type { ApiKeyEntry, EnrollmentSecret } from './server.js'
 
 /**
@@ -105,8 +106,18 @@ const relayEnvSchema = z.object({
   BROWSERBAY_API_KEY: z.preprocess((value) => (value === '' ? undefined : value), z.string().min(16).optional()),
   BROWSERBAY_API_KEYS: z.string().default(''),
   BROWSERBAY_ENROLLMENT_SECRETS: z.string().min(1),
-  BROWSERBAY_MAX_ACQUIRE_WAIT_MS: z.coerce.number().int().min(0).max(300_000).default(60_000)
+  BROWSERBAY_MAX_ACQUIRE_WAIT_MS: z.coerce.number().int().min(0).max(300_000).default(60_000),
+  /** The private key (a JWK) whose public half the relay publishes for Web Bot Auth. Empty means it publishes none. */
+  BROWSERBAY_WEB_BOT_AUTH_KEY: z.string().default('')
 })
+
+/** The Web Bot Auth key, checked now so a bad one stops the process at start-up, or undefined for none. */
+function webBotAuthKeyOf(text: string) {
+  const key = text.trim()
+  if (!key) return undefined
+  parseSigningKey(key)
+  return key
+}
 
 /** The relay's own settings. It has no database, cache or auth of its own: only these. */
 export function parseRelayConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -116,7 +127,8 @@ export function parseRelayConfig(env: NodeJS.ProcessEnv = process.env) {
     port: parsed.data.PORT,
     apiKeys: collectApiKeys(parsed.data, 'Invalid relay configuration'),
     enrollmentSecrets: parseEnrollmentSecrets(parsed.data.BROWSERBAY_ENROLLMENT_SECRETS),
-    maxAcquireWaitMs: parsed.data.BROWSERBAY_MAX_ACQUIRE_WAIT_MS
+    maxAcquireWaitMs: parsed.data.BROWSERBAY_MAX_ACQUIRE_WAIT_MS,
+    webBotAuthKey: webBotAuthKeyOf(parsed.data.BROWSERBAY_WEB_BOT_AUTH_KEY)
   }
 }
 
@@ -133,6 +145,7 @@ export function parseBoxConfig(env: NodeJS.ProcessEnv = process.env) {
     port: parsed.data.PORT,
     apiKeys: collectApiKeys(parsed.data, 'Invalid configuration'),
     remoteEnrollmentSecrets: parseEnrollmentSecrets(parsed.data.BROWSERBAY_ENROLLMENT_SECRETS, { allowEmpty: true }),
-    maxAcquireWaitMs: parsed.data.BROWSERBAY_MAX_ACQUIRE_WAIT_MS
+    maxAcquireWaitMs: parsed.data.BROWSERBAY_MAX_ACQUIRE_WAIT_MS,
+    webBotAuthKey: webBotAuthKeyOf(parsed.data.BROWSERBAY_WEB_BOT_AUTH_KEY)
   }
 }

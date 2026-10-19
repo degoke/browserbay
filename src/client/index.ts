@@ -70,6 +70,12 @@ export interface AcquireOptions {
   locale?: string
   /** Only place the slot on a node that carries every one of these labels (`BROWSERBAY_NODE_LABELS` on the node). */
   nodeLabels?: string[]
+  /**
+   * Sign every request of the slot's browser (Web Bot Auth), so sites that know the box can tell whose browser it is. `true` needs a
+   * node that signs and `false` one that can leave a slot unsigned; left out, the node's own setting
+   * (`BROWSERBAY_WEB_BOT_AUTH`) decides. Throws `UnsupportedError` when no node can.
+   */
+  signRequests?: boolean
 }
 
 /** The part of a slot worth keeping to come back to it later (`box.slot(stored)`). It contains the slot token: store it like a secret. */
@@ -330,7 +336,7 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
   }
 
   return {
-    async acquire({ runId, maxLifetimeSeconds, waitMs = 30_000, proxy, timezone, locale, nodeLabels }) {
+    async acquire({ runId, maxLifetimeSeconds, waitMs = 30_000, proxy, timezone, locale, nodeLabels, signRequests }) {
       const fullRunId = namespacePrefix ? `${namespacePrefix}${runId}` : runId
       if (typeof runId !== 'string' || !runId || fullRunId.length > SLOT_LIMITS.maxRunIdLength) {
         throw new TypeError(
@@ -366,12 +372,15 @@ export function createBrowserBay(options: BrowserBayOptions): BrowserBay {
       ) {
         throw new TypeError('nodeLabels must be a list of strings')
       }
+      if (signRequests !== undefined && typeof signRequests !== 'boolean')
+        throw new TypeError('signRequests must be true or false')
       // Only what was asked for is sent, so a request without options is the one a box has always taken.
       const options: Partial<CreateSlotRequest> = {
         ...(proxy !== undefined ? { proxy } : {}),
         ...(timezone !== undefined ? { timezone } : {}),
         ...(locale !== undefined ? { locale } : {}),
-        ...(nodeLabels !== undefined && nodeLabels.length > 0 ? { nodeLabels } : {})
+        ...(nodeLabels !== undefined && nodeLabels.length > 0 ? { nodeLabels } : {}),
+        ...(signRequests !== undefined ? { signRequests } : {})
       }
       const body: CreateSlotRequest = { runId: fullRunId, maxLifetimeSeconds, waitMs, ...options }
       // What was asked for is exactly the options: the plain fields are not among them, whatever is added to either part.

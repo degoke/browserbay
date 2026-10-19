@@ -13,6 +13,7 @@ import {
   type NodeLink,
   type NodeRegistry
 } from './registry.js'
+import { createDirectory, DIRECTORY_PATH } from '../web-bot-auth.js'
 import {
   appliedNames,
   featuresFor,
@@ -25,6 +26,7 @@ import {
 import {
   CLOSE,
   NODE_LIMITS,
+  SIGNING_KEY_FEATURE,
   NODE_PROTOCOL_VERSION,
   RELAY_PATHS,
   SLOT_LIMITS,
@@ -86,6 +88,12 @@ export interface RelayOptions {
   createTimeoutMs?: number
   /** After the relay starts, a request no connected node could serve waits like any other (see the registry). Default 15 s. */
   unsupportedGraceMs?: number
+  /**
+   * A private key (an Ed25519 JWK, in JSON) whose public half the relay publishes at `/.well-known/http-message-signatures-directory`,
+   * for Web Bot Auth. Nodes sign with the private key; this is only how a site finds the public one. Without it nothing is
+   * published, and a slot that asks to be signed goes to any node that signs.
+   */
+  webBotAuthKey?: string
   sweepMs?: number
   logger?: RelayLogger
   now?: () => number
@@ -164,6 +172,7 @@ export function createRelayServer(options: RelayOptions) {
   const slowConsumerGraceMs = options.slowConsumerGraceMs ?? 10_000
   const now = options.now ?? Date.now
 
+  const directory = options.webBotAuthKey ? createDirectory(options.webBotAuthKey, { now: options.now }) : undefined
   const clientSockets = new Map<string, Set<WebSocket>>()
   const pendingStreams = new Map<string, PendingStream>()
 
@@ -219,6 +228,15 @@ export function createRelayServer(options: RelayOptions) {
     if (path === null) return fail(res, 400, 'invalid_request')
     try {
       if (method === 'GET' && path === RELAY_PATHS.health) return json(res, 200, { status: 'ok' })
+      // Anyone may read the public key: that is what it is for. Nothing else here is open.
+      if (method === 'GET' && path === DIRECTORY_PATH && directory) {
+        const body = directory.body
+        res.writeHead(200, {
+          ...directory.headers(String(req.headers.host ?? '')),
+          'content-length': Buffer.byteLength(body)
+        })
+        return void res.end(body)
+      }
 
       const slotMatch = /^\/v1\/slots\/([\w-]+)$/.exec(path)
       // The slot token, not the API key: this is how a client asks "is my browser still there?".
@@ -312,7 +330,11 @@ export function createRelayServer(options: RelayOptions) {
         waitMs: Math.min(waitMs ?? 0, maxAcquireWaitMs),
         signal: abandoned.signal,
         need: {
-          features: [...featuresFor(slotOptions)],
+          features: [
+            ...featuresFor(slotOptions),
+            // Signatures made with another key would not verify against the directory this relay publishes.
+            ...(slotOptions.signRequests === true && directory ? [`${SIGNING_KEY_FEATURE}${directory.keyid}`] : [])
+          ],
           labels: nodeLabels
         },
         options: slotOptions
@@ -581,6 +603,8 @@ export function createRelayServer(options: RelayOptions) {
   return {
     server,
     registry,
+    /** The id of the key whose directory this relay publishes, when it publishes one. */
+    webBotAuthKeyId: directory?.keyid,
     listen(port: number, host?: string) {
       return new Promise<number>((resolve, reject) => {
         server.once('error', reject)

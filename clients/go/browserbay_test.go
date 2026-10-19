@@ -224,7 +224,7 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		created := map[string]any{"slotId": id, "token": slot.token, "nodeId": slot.nodeID}
 		if f.opts.modern {
 			applied := []string{}
-			for _, name := range []string{"proxy", "timezone", "locale", "nodeLabels"} {
+			for _, name := range []string{"proxy", "timezone", "locale", "nodeLabels", "signRequests"} {
 				if _, ok := body[name]; ok {
 					applied = append(applied, name)
 				}
@@ -1581,5 +1581,39 @@ func TestNodesSayWhatTheyCanDoWhatTheyAreCalledAndWhetherTheyAreKeptForTheirLabe
 	}
 	if len(nodes[1].Features) != 0 || len(nodes[1].Labels) != 0 || nodes[1].Exclusive {
 		t.Errorf("a box that predates them sends none: %+v", nodes[1])
+	}
+}
+
+func TestAcquireSendsSignRequestsWhenAskedForFalseIncludedAndRefusesABoxThatPredatesIt(t *testing.T) {
+	yes, no := true, false
+	f := newFakeBox(fakeOptions{modern: true})
+	if _, err := newClient(t, f).Acquire(background(), browserbay.AcquireOptions{RunID: "a", MaxLifetime: 3000 * time.Second, SignRequests: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.callLog()[0].Body["signRequests"]; got != true {
+		t.Errorf("signRequests: %v", got)
+	}
+	g := newFakeBox(fakeOptions{modern: true})
+	if _, err := newClient(t, g).Acquire(background(), browserbay.AcquireOptions{RunID: "b", MaxLifetime: 3000 * time.Second, SignRequests: &no}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := g.callLog()[0].Body["signRequests"]; !ok || got != false {
+		t.Errorf("false is an ask, not the same as leaving it out: %v %v", got, ok)
+	}
+	h := newFakeBox(fakeOptions{modern: true})
+	if _, err := newClient(t, h).Acquire(background(), browserbay.AcquireOptions{RunID: "c", MaxLifetime: 3000 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.callLog()[0].Body["signRequests"]; ok {
+		t.Error("left out is left out: the node's own setting decides")
+	}
+
+	old := newFakeBox(fakeOptions{}) // predates the options
+	_, err := newClient(t, old).Acquire(background(), browserbay.AcquireOptions{RunID: "d", MaxLifetime: 3000 * time.Second, SignRequests: &yes})
+	if !errors.Is(err, browserbay.ErrUnsupported) || !strings.Contains(err.Error(), "did not apply signRequests") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(old.slotIDs()) != 0 {
+		t.Errorf("the unsigned browser it made was not released: %v", old.slotIDs())
 	}
 }

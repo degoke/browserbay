@@ -624,6 +624,26 @@ class SlotOptionTests(BoxTestCase):
                 self.acquire(service, **kwargs)
         self.assertEqual(fake.calls, [])
 
+    def test_sign_requests_is_sent_when_asked_for_false_included_and_an_old_box_is_refused(self) -> None:
+        fake = self.box(modern=True)
+        self.acquire(self.client(fake), sign_requests=True)
+        self.assertIs(fake.calls[0].body["signRequests"], True)  # type: ignore[index]
+        off = self.box(modern=True)
+        self.acquire(self.client(off), sign_requests=False)
+        self.assertIs(off.calls[0].body["signRequests"], False, "false is an ask, not the same as leaving it out")  # type: ignore[index]
+        unset = self.box(modern=True)
+        self.acquire(self.client(unset))
+        self.assertNotIn("signRequests", unset.calls[0].body)  # type: ignore[arg-type]
+
+        old = self.box()  # predates the options
+        with self.assertRaisesRegex(UnsupportedError, "did not apply signRequests"):
+            self.acquire(self.client(old), sign_requests=True)
+        self.assertEqual(old.slots, {}, "the unsigned browser it made was released")
+
+        for value in ["true", 1, {}]:
+            with self.assertRaises(TypeError, msg=repr(value)):
+                self.acquire(self.client(fake), sign_requests=value)  # type: ignore[arg-type]
+
     def test_a_proxys_repr_hides_its_password(self) -> None:
         proxy = Proxy("http://proxy.example.com:8080", "user", PASSWORD)
         for text in (repr(proxy), str(proxy), f"{proxy}", repr([proxy]), repr({"p": proxy})):

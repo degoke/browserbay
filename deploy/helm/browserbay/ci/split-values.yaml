@@ -18,3 +18,7 @@ relay:
     tls:
       - secretName: browsers-tls
         hosts: [browsers.example.com]
+webBotAuth:
+  mode: optional
+  agentUrl: https://browsers.example.com
+  existingSecret: my-web-bot-auth

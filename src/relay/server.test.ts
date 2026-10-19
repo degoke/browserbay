@@ -5,6 +5,7 @@ import { WebSocket } from 'ws'
 import { hashToken } from './registry.js'
 import { CLOSE, RELAY_PATHS, TOKEN_HEADER, type NodeContextReport, type RelayToNode } from '../protocol.js'
 import { createRelayServer, type RelayOptions } from './server.js'
+import { DIRECTORY_MEDIA_TYPE, DIRECTORY_PATH, generateSigningKey } from '../web-bot-auth.js'
 import { parseApiKeys, parseBoxConfig, parseEnrollmentSecrets, parseRelayConfig } from './config.js'
 
 const API_KEY = 'relay-api-key-0123456789'
@@ -1110,6 +1111,147 @@ test('the node list says what each node can do, what it is called and whether it
     plain.close()
     await relay.close()
   }
+})
+
+// ---- Web Bot Auth: the key directory and which nodes sign with it ------------------------------------------------------
+
+const RELAY_KEY = generateSigningKey()
+const OTHER_KEY = generateSigningKey()
+
+test('the relay publishes its public key, to anyone, signed over the host that asked, and only when it has a key', async () => {
+  const { relay, base } = await startRelay({ webBotAuthKey: RELAY_KEY.privateJwk })
+  try {
+    // No API key: a site reads this, and a site has none.
+    const response = await fetch(`${base}${DIRECTORY_PATH}`, { headers: { host: 'box.example.com' } })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), DIRECTORY_MEDIA_TYPE)
+    const body = (await response.json()) as { keys: Array<Record<string, string>> }
+    assert.deepEqual(body, { keys: [{ kty: 'OKP', crv: 'Ed25519', x: RELAY_KEY.publicJwk.x, kid: RELAY_KEY.keyid }] })
+    assert.ok(!JSON.stringify(body).includes(JSON.parse(RELAY_KEY.privateJwk).d), 'the private half is not in it')
+    assert.match(
+      response.headers.get('signature-input')!,
+      new RegExp(`keyid="${RELAY_KEY.keyid}".*tag="http-message-signatures-directory"`)
+    )
+    assert.match(response.headers.get('signature')!, /^sig1=:[A-Za-z0-9+/=]+:$/)
+    assert.equal(relay.webBotAuthKeyId, RELAY_KEY.keyid)
+    // Nothing else is open: the API still wants its key.
+    assert.equal((await fetch(`${base}/v1/slots`)).status, 401)
+  } finally {
+    await relay.close()
+  }
+
+  const bare = await startRelay()
+  try {
+    assert.equal(
+      (await fetch(`${bare.base}${DIRECTORY_PATH}`)).status,
+      401,
+      'no key, no directory: the path is just another one that wants the API key'
+    )
+    assert.equal(bare.relay.webBotAuthKeyId, undefined)
+  } finally {
+    await bare.relay.close()
+  }
+  assert.throws(
+    () => createRelayServer({ apiKey: API_KEY, enrollmentSecrets: ENROLLMENTS, webBotAuthKey: 'not a key' }),
+    /JSON Web Key/
+  )
+})
+
+test('a slot that asks to be signed goes only to a node signing with the key the relay publishes; one that asks not to is not put on one that always signs', async () => {
+  const { relay, base, wsBase } = await startRelay({ webBotAuthKey: RELAY_KEY.privateJwk, unsupportedGraceMs: 0 })
+  const wrongKey = await connectNode(wsBase, {
+    nodeId: 'wrong-key',
+    features: ['sign', `wba-key:${OTHER_KEY.keyid}`, 'unsigned']
+  })
+  const unsigned = await connectNode(wsBase, { nodeId: 'unsigned', features: ['unsigned'] })
+  try {
+    await wrongKey.welcomed()
+    await unsigned.welcomed()
+    // The only node that signs signs with a key this relay does not publish: its signatures would not verify.
+    const refused = await createSlot(base, { runId: 'a', maxLifetimeSeconds: 600, signRequests: true })
+    assert.equal(refused.status, 422)
+    assert.match(
+      ((await refused.json()) as { message: string }).message,
+      /No node offers signing with the key this relay publishes/
+    )
+    assert.equal(wrongKey.received.filter((m) => m.t === 'context.create').length, 0)
+
+    const right = await connectNode(wsBase, { nodeId: 'right', features: ['sign', `wba-key:${RELAY_KEY.keyid}`] })
+    await right.welcomed()
+    const signed = await createSlot(base, { runId: 'b', maxLifetimeSeconds: 600, signRequests: true })
+    assert.equal(signed.status, 201)
+    const slot = (await signed.json()) as { nodeId: string; applied: string[] }
+    assert.equal(slot.nodeId, 'right')
+    assert.deepEqual(slot.applied, ['signRequests'])
+    const created = right.received.find((m) => m.t === 'context.create')
+    assert.deepEqual(
+      created && created.t === 'context.create' ? created.options : null,
+      { signRequests: true },
+      'the node is told, as an option'
+    )
+
+    // `false` goes to a node that can leave a slot unsigned: not the one that always signs.
+    const off = await createSlot(base, { runId: 'c', maxLifetimeSeconds: 600, signRequests: false })
+    assert.equal(off.status, 201)
+    assert.equal(
+      ((await off.json()) as { nodeId: string }).nodeId,
+      'wrong-key',
+      'the least loaded of the nodes that can: right (always) is not one of them'
+    )
+    right.close()
+  } finally {
+    wrongKey.close()
+    unsigned.close()
+    await relay.close()
+  }
+})
+
+test('without a key of its own a relay asks nothing of a node’s key: any node that signs will do', async () => {
+  const { relay, base, wsBase } = await startRelay({ unsupportedGraceMs: 0 })
+  const node = await connectNode(wsBase, { nodeId: 'signs', features: ['sign', `wba-key:${OTHER_KEY.keyid}`] })
+  try {
+    await node.welcomed()
+    assert.equal(
+      (await createSlot(base, { runId: 'a', maxLifetimeSeconds: 600, signRequests: true })).status,
+      201,
+      'the directory may be hosted elsewhere'
+    )
+    const refused = await createSlot(base, { runId: 'b', maxLifetimeSeconds: 600, signRequests: 'yes' })
+    assert.equal(refused.status, 400)
+    assert.match(((await refused.json()) as { message: string }).message, /signRequests must be true or false/)
+  } finally {
+    node.close()
+    await relay.close()
+  }
+})
+
+test('relay settings: BROWSERBAY_WEB_BOT_AUTH_KEY is checked at start-up, for the relay and the box, and is optional', () => {
+  const env = { BROWSERBAY_API_KEY: 'k'.repeat(16), BROWSERBAY_ENROLLMENT_SECRETS: `n:${'0'.repeat(64)}` }
+  assert.equal(parseRelayConfig(env).webBotAuthKey, undefined)
+  assert.equal(
+    parseRelayConfig({ ...env, BROWSERBAY_WEB_BOT_AUTH_KEY: '  ' }).webBotAuthKey,
+    undefined,
+    'blank is not set'
+  )
+  assert.equal(
+    parseRelayConfig({ ...env, BROWSERBAY_WEB_BOT_AUTH_KEY: RELAY_KEY.privateJwk }).webBotAuthKey,
+    RELAY_KEY.privateJwk
+  )
+  assert.throws(() => parseRelayConfig({ ...env, BROWSERBAY_WEB_BOT_AUTH_KEY: 'nope' }), /JSON Web Key/)
+  assert.throws(
+    () =>
+      parseRelayConfig({
+        ...env,
+        BROWSERBAY_WEB_BOT_AUTH_KEY: JSON.stringify({ kty: 'OKP', crv: 'Ed25519', x: 'AA' })
+      }),
+    /private key/
+  )
+  const box = { BROWSERBAY_API_KEY: 'k'.repeat(16) }
+  assert.equal(
+    parseBoxConfig({ ...box, BROWSERBAY_WEB_BOT_AUTH_KEY: RELAY_KEY.privateJwk }).webBotAuthKey,
+    RELAY_KEY.privateJwk
+  )
+  assert.equal(parseBoxConfig(box).webBotAuthKey, undefined)
 })
 
 test('a node that refuses a slot is a 422 at once, with its words quoted in the relay’s own sentence; a node that is only full is not', async () => {

@@ -141,6 +141,11 @@ type AcquireOptions struct {
 	Locale string
 	// NodeLabels places the slot only on a node that carries every one of these labels (BROWSERBAY_NODE_LABELS).
 	NodeLabels []string
+	// SignRequests signs every request of the slot's browser (Web Bot Auth), so sites that know the box can tell whose
+	// browser it is. True needs a node that signs and false one that can leave a slot unsigned; nil leaves it to the node's
+	// own setting (BROWSERBAY_WEB_BOT_AUTH). Acquire fails with [ErrUnsupported] when no node can. It is a pointer so that
+	// false can be asked for.
+	SignRequests *bool
 }
 
 // ProxyOptions is a proxy for one slot ([AcquireOptions.Proxy]).
@@ -460,8 +465,10 @@ func (c *Client) Acquire(ctx context.Context, opts AcquireOptions) (*Slot, error
 		Timezone           string     `json:"timezone,omitempty"`
 		Locale             string     `json:"locale,omitempty"`
 		NodeLabels         []string   `json:"nodeLabels,omitempty"`
+		SignRequests       *bool      `json:"signRequests,omitempty"`
 	}{RunID: fullRunID, MaxLifetimeSeconds: int64(opts.MaxLifetime / time.Second),
-		WaitMilliseconds: int64(wait / time.Millisecond), Timezone: opts.Timezone, Locale: opts.Locale, NodeLabels: opts.NodeLabels}
+		WaitMilliseconds: int64(wait / time.Millisecond), Timezone: opts.Timezone, Locale: opts.Locale, NodeLabels: opts.NodeLabels,
+		SignRequests: opts.SignRequests}
 	var asked []string
 	if p := opts.Proxy; p != nil {
 		request.Proxy = &wireProxy{Server: p.Server, Username: p.Username, Password: p.Password, Bypass: p.Bypass}
@@ -475,6 +482,9 @@ func (c *Client) Acquire(ctx context.Context, opts AcquireOptions) (*Slot, error
 	}
 	if len(opts.NodeLabels) > 0 {
 		asked = append(asked, "nodeLabels")
+	}
+	if opts.SignRequests != nil {
+		asked = append(asked, "signRequests")
 	}
 	body, err := json.Marshal(request)
 	if err != nil {

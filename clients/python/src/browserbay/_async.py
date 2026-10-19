@@ -135,6 +135,7 @@ class AsyncBrowserBay:
         timezone: Optional[str] = None,
         locale: Optional[str] = None,
         node_labels: Optional[Sequence[str]] = None,
+        sign_requests: Optional[bool] = None,
     ) -> AsyncSlot:
         """Takes a browser; see :meth:`BrowserBay.acquire`. Raises ``NoCapacityError`` when the box stays full."""
         call = functools.partial(
@@ -146,6 +147,7 @@ class AsyncBrowserBay:
             timezone=timezone,
             locale=locale,
             node_labels=node_labels,
+            sign_requests=sign_requests,
         )
         slot = await asyncio.get_running_loop().run_in_executor(self._acquire_pool, call)
         return AsyncSlot(slot)

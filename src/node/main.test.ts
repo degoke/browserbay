@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ConfigError, startBrowserNode } from './browser-node.js'
+import { generateSigningKey } from '../web-bot-auth.js'
 import { parseNodeEnv, parseNodeSettings } from './main.js'
 
 const SECRET = 'a-node-enrollment-secret'
@@ -233,5 +234,67 @@ test('a node on xvfb refuses to start when Xvfb cannot run, in either isolation 
     if (saved === undefined) delete process.env.TMPDIR
     else process.env.TMPDIR = saved
     await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test('node settings: Web Bot Auth is off unless asked for, and asking for it needs a key and where the box says it is', () => {
+  assert.equal(parseNodeSettings({}).webBotAuth, undefined)
+  assert.ok(!('webBotAuth' in parseNodeSettings({ BROWSERBAY_WEB_BOT_AUTH: 'off' })))
+  assert.ok(!('webBotAuth' in parseNodeSettings({ BROWSERBAY_WEB_BOT_AUTH: '' })), 'empty is not set')
+
+  const made = generateSigningKey()
+  const base = {
+    BROWSERBAY_WEB_BOT_AUTH_KEY: made.privateJwk,
+    BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com'
+  }
+  for (const mode of ['optional', 'always', 'ALWAYS']) {
+    const settings = parseNodeSettings({ ...base, BROWSERBAY_WEB_BOT_AUTH: mode })
+    assert.deepEqual(settings.webBotAuth, {
+      mode: mode.toLowerCase(),
+      key: made.privateJwk,
+      agent: 'https://box.example.com',
+      format: 'legacy',
+      ttlSeconds: 60
+    })
+  }
+  const custom = parseNodeSettings({
+    ...base,
+    BROWSERBAY_WEB_BOT_AUTH: 'optional',
+    BROWSERBAY_WEB_BOT_AUTH_FORMAT: 'Dictionary',
+    BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '300'
+  })
+  assert.equal(custom.webBotAuth?.format, 'dictionary')
+  assert.equal(custom.webBotAuth?.ttlSeconds, 300)
+  assert.equal(
+    parseNodeSettings({ ...base, BROWSERBAY_WEB_BOT_AUTH: 'optional', BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '  ' })
+      .webBotAuth?.ttlSeconds,
+    60
+  )
+})
+
+test('node settings: a Web Bot Auth setting that cannot work stops the node at start-up, naming it, and never showing the key', () => {
+  const made = generateSigningKey()
+  const ok = {
+    BROWSERBAY_WEB_BOT_AUTH: 'always',
+    BROWSERBAY_WEB_BOT_AUTH_KEY: made.privateJwk,
+    BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com'
+  }
+  const secret = JSON.parse(made.privateJwk).d as string
+  for (const [env, expected] of [
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH: 'sometimes' }, /BROWSERBAY_WEB_BOT_AUTH must be "off", "optional" or "always"/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_KEY: '' }, /needs BROWSERBAY_WEB_BOT_AUTH_KEY/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_KEY: 'not a key' }, /JSON Web Key/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: '' }, /needs BROWSERBAY_WEB_BOT_AUTH_AGENT/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: 'http://box.example.com' }, /https address/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_AGENT: 'https://box.example.com/path' }, /no path/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_FORMAT: 'xml' }, /"legacy" or "dictionary"/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: '5' }, /10 to 86400/],
+    [{ ...ok, BROWSERBAY_WEB_BOT_AUTH_TTL_SECONDS: 'soon' }, /10 to 86400/]
+  ] as const) {
+    assert.throws(
+      () => parseNodeSettings(env),
+      (error: Error) => expected.test(error.message) && !error.message.includes(secret),
+      JSON.stringify(env).slice(0, 80)
+    )
   }
 })

@@ -26,6 +26,7 @@ import { connect as netConnect, createServer, isIP, type Server, type Socket } f
 import { connect as tlsConnect } from 'node:tls'
 import type { ProxySettings } from '../protocol.js'
 import { isForbiddenIp, parseProxyServer, type ProxyServer } from '../proxy-address.js'
+import type { RequestSigner } from '../web-bot-auth.js'
 import type { RunContext } from './scope.js'
 
 export interface ProxyForwarder {
@@ -416,12 +417,17 @@ export function contextProxy(forwarder: ProxyForwarder, settings: ProxySettings)
 }
 
 /**
- * What a run is created with: the forwarder's address when the slot has a proxy. Nothing at all (`undefined`) for a plain slot,
- * so its context is made as it always was.
+ * What a run is created with: the forwarder's address when the slot has a proxy, and a way to sign when its requests are signed.
+ * Nothing at all (`undefined`) for a plain slot, so its context is made as it always was.
  */
 export function runContext(
   forwarder: ProxyForwarder | undefined,
-  proxy: ProxySettings | undefined
+  proxy: ProxySettings | undefined,
+  signer: RequestSigner | undefined
 ): RunContext | undefined {
-  return forwarder ? contextProxy(forwarder, proxy!) : undefined
+  const context: RunContext = {
+    ...(forwarder ? contextProxy(forwarder, proxy!) : {}),
+    ...(signer ? { sign: (url: string) => signer.sign(url) } : {})
+  }
+  return Object.keys(context).length > 0 ? context : undefined
 }

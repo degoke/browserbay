@@ -76,7 +76,7 @@ The [live view guide](/docs/guides/live-view/) shows what to send over such a co
 | `slot.Release(ctx)`        | Closes the browser. Idempotent.                                                                                                                                          |
 | `json.Marshal(slot)`       | What to save to come back later. It holds the slot token: store it like a secret.                                                                                        |
 
-`AcquireOptions` also takes `Proxy` (a `*ProxyOptions` with `Server`, `Username`, `Password` and `Bypass`), `Timezone`, `Locale` and `NodeLabels`. `ProxyOptions` prints with its password hidden. `Acquire` fails with `ErrUnsupported` when no node can give what was asked for, and when the box is older than the options (it would have made a plain browser, which is released before the error is returned).
+`AcquireOptions` also takes `Proxy` (a `*ProxyOptions` with `Server`, `Username`, `Password` and `Bypass`), `Timezone`, `Locale`, `NodeLabels` and `SignRequests` (a `*bool`, so that `false` can be asked for and `nil` leaves it to the node). `ProxyOptions` prints with its password hidden. `Acquire` fails with `ErrUnsupported` when no node can give what was asked for, and when the box is older than the options (it would have made a plain browser, which is released before the error is returned).
 
 ```go
 slot, err := box.Acquire(ctx, browserbay.AcquireOptions{

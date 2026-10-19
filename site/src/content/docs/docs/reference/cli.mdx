@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: The browserbay command and its five subcommands.
+description: The browserbay command and its six subcommands.
 ---
 
 The `browserbay` command is what the Docker images run. From a checkout, run it as `node dist/cli.js <command>` after `pnpm build`.
@@ -14,6 +14,7 @@ The `browserbay` command is what the Docker images run. From a checkout, run it 
 | `browserbay node`                                    | A browser node alone. It dials out to a relay.                                                                                                                                                                                    |
 | `browserbay secret [name]`                           | Makes an enrollment secret for a node, and the entry the relay needs for it. The name defaults to `node`.                                                                                                                         |
 | `browserbay key [name [--namespace ns] [--quota n]]` | Prints a new API key. With a name it also prints the `BROWSERBAY_API_KEYS` entry the relay needs, optionally confined to a namespace with a quota of slots. See [Several API keys](/docs/deploy/configuration/#several-api-keys). |
+| `browserbay web-bot-auth`                            | Makes the Ed25519 key a box signs its browsers' requests with (Web Bot Auth), and prints the settings that use it.                                                                                                                |
 
 Settings are environment variables. See [Configuration](/docs/deploy/configuration/).
 
@@ -46,6 +47,25 @@ The service must create its browsers with namespace "billing".
 A name and a namespace may contain letters, digits, `_`, `.` and `-`. `--quota` needs `--namespace`.
 
 `key` always makes a new key. To use one you already have, hash it yourself: see [A key you already have](/docs/deploy/configuration/#a-key-you-already-have).
+
+## web-bot-auth
+
+```sh
+docker run --rm ghcr.io/degoke/browserbay web-bot-auth
+```
+
+```
+Give the relay and every node that signs:  BROWSERBAY_WEB_BOT_AUTH_KEY='{"kty":"OKP","crv":"Ed25519","d":"...","x":"...","kid":"..."}'
+Its id, which is what a site looks the key up by:  <thumbprint>
+
+On each node that signs, say how and where the box says it is:
+  BROWSERBAY_WEB_BOT_AUTH=optional   (or "always": sign every slot, and not only the ones that ask)
+  BROWSERBAY_WEB_BOT_AUTH_AGENT=https://<the address your relay is served at>
+
+The relay then publishes the public key at  https://<your relay>/.well-known/http-message-signatures-directory
+```
+
+The key is private: keep it like a password, and give it to the relay and to the nodes that sign, as a secret. It is shown once. The id is the JWK thumbprint of the public key, the same on every machine. See [Identify your box to sites](/docs/guides/avoid-bot-blocks/#identify-your-box-to-sites).
 
 ## Exit codes
 

@@ -85,8 +85,6 @@ function fakeBox(
       if (!asOwner) return reply(401, { error: 'unauthorized' })
       if (options.createStatus && options.createStatus !== 201) return reply(options.createStatus, options.createBody)
       if (options.createBody !== undefined) return reply(201, options.createBody)
-      const sent = JSON.parse(String(init?.body))
-      const applied = ['proxy', 'timezone', 'locale', 'nodeLabels'].filter((name) => name in sent)
       const slotId = `slot-${++counter}`
       const slot: BoxSlot = {
         slotId,
@@ -96,6 +94,8 @@ function fakeBox(
         token: `slot-token-${counter}-PLAINTEXT`
       }
       slots.set(slotId, slot)
+      const sent = JSON.parse(String(init?.body))
+      const applied = ['proxy', 'timezone', 'locale', 'nodeLabels', 'signRequests'].filter((name) => name in sent)
       return reply(201, { slotId, token: slot.token, nodeId: slot.nodeId, ...(options.modern ? { applied } : {}) })
     }
 
@@ -800,4 +800,31 @@ test('client: options of the wrong type are refused before anything is sent', as
     await assert.rejects(client(box.impl).acquire(acquireOptions('r', options)), TypeError, JSON.stringify(options))
   }
   assert.equal(box.calls.length, 0)
+})
+
+test('client: signRequests is sent when asked for, false included, and a box that predates it refuses rather than hand back an unsigned browser', async () => {
+  const box = fakeBox({ modern: true })
+  await client(box.impl).acquire(acquireOptions('run-1', { signRequests: true }))
+  assert.equal(box.calls[0]!.body!.signRequests, true)
+  const off = fakeBox({ modern: true })
+  await client(off.impl).acquire(acquireOptions('run-2', { signRequests: false }))
+  assert.equal(off.calls[0]!.body!.signRequests, false, 'false is an ask: it is not the same as leaving it out')
+  const unset = fakeBox({ modern: true })
+  await client(unset.impl).acquire(acquireOptions('run-3'))
+  assert.ok(!('signRequests' in unset.calls[0]!.body!), 'left out is left out: the node’s own setting decides')
+
+  const old = fakeBox() // predates the options
+  await assert.rejects(
+    client(old.impl).acquire(acquireOptions('run-4', { signRequests: true })),
+    (error: Error) => error instanceof UnsupportedError && /did not apply signRequests/.test(error.message)
+  )
+  assert.equal(old.slots.size, 0, 'and the browser it made unsigned was released')
+
+  for (const value of ['true', 1, null, {}]) {
+    await assert.rejects(
+      client(box.impl).acquire(acquireOptions('r', { signRequests: value as never })),
+      TypeError,
+      JSON.stringify(value)
+    )
+  }
 })

@@ -38,12 +38,14 @@ export async function runBox(env: NodeJS.ProcessEnv = process.env) {
       ...config.remoteEnrollmentSecrets
     ],
     maxAcquireWaitMs: config.maxAcquireWaitMs,
+    webBotAuthKey: config.webBotAuthKey,
     logger: { info: jsonLog('info'), warn: jsonLog('warn') }
   })
   const port = await relay.listen(config.port)
   jsonLog('info')('browserbay listening', {
     port,
-    remoteNodes: config.remoteEnrollmentSecrets.map((entry) => entry.id)
+    remoteNodes: config.remoteEnrollmentSecrets.map((entry) => entry.id),
+    ...(relay.webBotAuthKeyId ? { webBotAuthKeyId: relay.webBotAuthKeyId } : {})
   })
 
   let node: BrowserNode

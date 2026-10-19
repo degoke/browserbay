@@ -25,6 +25,8 @@ import { chromiumArgs, chromiumEnv, findChromium, type Display } from './chromiu
 import { createPipeUpstream } from './pipe-upstream.js'
 import { createProcessHost, removeStaleProfiles, type ProcessHost } from './process-host.js'
 import { createScopeHost } from './scope-host.js'
+import { signingFeatures, type SigningHost, type WebBotAuthSettings } from './signing.js'
+import { createRequestSigner } from '../web-bot-auth.js'
 import { createCdpScope } from './scope.js'
 import { startXvfb, type Xvfb, type XvfbOptions } from './xvfb.js'
 
@@ -61,6 +63,8 @@ export interface BrowserNodeOptions {
   labels?: string[]
   /** Only take slots that ask for one of this node's labels, so ordinary slots do not fill (say) a machine on a home connection. */
   exclusive?: boolean
+  /** Sign the requests of the slots that are to be signed (Web Bot Auth). Left out, the node signs none. */
+  webBotAuth?: WebBotAuthSettings
   /** For tests: how Xvfb is found and started. */
   xvfb?: XvfbOptions
   /** Keep Chromium's own sandbox on (needs user namespaces). */
@@ -99,11 +103,23 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
     exclusive = false,
     logger = {}
   } = options
+  // One signer for the node: the key is read once, and a bad one stops the node here, before it takes a slot.
+  let signing: SigningHost | undefined
+  try {
+    if (options.webBotAuth) {
+      const { mode, key, agent, format, ttlSeconds } = options.webBotAuth
+      signing = { mode, signer: createRequestSigner({ key, agent, format, ttlSeconds }) }
+    }
+  } catch (error) {
+    throw error instanceof ConfigError ? error : new ConfigError(errorMessage(error))
+  }
   // What a slot can ask of this node. A proxy is per context, so a shared Chromium does it too. A time zone and a language are
   // set when a browser starts, so only a Chromium of its own per slot can.
-  // What a slot can ask of this node. A proxy is per context, so a shared Chromium does it too. A time zone and a language are
-  // set when a browser starts, so only a Chromium of its own per slot can.
-  const features: string[] = [NODE_FEATURE.proxy, ...(isolation === 'process' ? [NODE_FEATURE.locale] : [])]
+  const features: string[] = [
+    NODE_FEATURE.proxy,
+    ...(isolation === 'process' ? [NODE_FEATURE.locale] : []),
+    ...signingFeatures(signing)
+  ]
   const executable = options.executable ?? findChromium()
   if (!executable) {
     throw new ConfigError('Chromium was not found. Use the browserbay image, or set BROWSERBAY_CHROMIUM_EXECUTABLE.')
@@ -149,7 +165,8 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
           sandbox,
           profileRoot: options.profileDir,
           logger,
-          xvfb: options.xvfb
+          xvfb: options.xvfb,
+          signing
         })
       : undefined
 
@@ -235,7 +252,7 @@ export async function startBrowserNode(options: BrowserNodeOptions): Promise<Bro
         allowInsecureRelay,
         enrollmentSecret,
         nodeId,
-        scope: createScopeHost(scope, { logger }),
+        scope: createScopeHost(scope, { logger, signing }),
         maxContexts,
         features,
         labels,

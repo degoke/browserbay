@@ -59,6 +59,12 @@ export interface ScopeLogger {
 export interface RunContext {
   proxyServer?: string
   proxyBypassList?: string
+  /**
+   * Signs the run's requests: given a URL, the headers to add to the request for it (Web Bot Auth). The hub holds a session of its own
+   * on every tab of such a run and adds them as each request is made, so it is done whoever drives the tab and whether or not anyone
+   * does. A request that cannot be signed goes out unsigned: this is identity, and not something the browser depends on.
+   */
+  sign?: (url: string) => Record<string, string>
 }
 
 export interface CdpScope {
@@ -154,11 +160,32 @@ interface SessionRecord {
   owner: Client
   paused: boolean
   parent?: string
+  /** The tab this session is on, for a session the hub handed out for a new tab. */
+  targetId?: string
+  /**
+   * Set while the hub is setting the tab up to sign its requests: nothing the client sends on this session (and not the resume
+   * that lets the tab run) reaches the tab before that is done. Left in place afterwards, as the end of the chain `queue` is on.
+   */
+  setup?: Promise<void>
+  /** The tail of the commands held for `setup`, so the ones that arrive later wait behind the ones held, in order. */
+  queue?: Promise<void>
 }
+
+/** A session the hub holds for itself on a tab (or a frame in it) of a run whose requests are signed. Never a client's. */
+interface HubSession {
+  run: Run
+  /** For a session on a frame inside a tab: the hub session of the tab. */
+  parent?: string
+}
+
+/** Headers the hub replaces rather than adds to, so a page that sets its own does not end up with two. */
+const SIGNATURE_HEADERS = new Set(['signature', 'signature-input', 'signature-agent'])
 
 interface Run {
   /** What the run's context was made with. A context a client of a dedicated browser makes starts from it. */
   proxy?: RunContext
+  /** Signs the run's requests, when it is to (see RunContext.sign). */
+  sign?: RunContext['sign']
   contextId: string
   /** The run's own context and, on a dedicated browser, any the client made (all of them are the run's). */
   contexts: Set<string>
@@ -239,12 +266,18 @@ export function createCdpScope({
   upstream,
   logger = {},
   requestTimeoutMs = 30_000,
+  signingSetupMs = 5000,
   dedicated = false
 }: {
   upstream: ScopeUpstream
   logger?: ScopeLogger
   /** How long a request to the browser may go unanswered before it fails (default 30 s). */
   requestTimeoutMs?: number
+  /**
+   * The longest a new tab of a signing run is held while the hub sets it up to sign (default 5 s). Past it the tab runs, unsigned
+   * until the setup finishes, and a warning says so: a tab must not wait for ever on a browser that stopped answering.
+   */
+  signingSetupMs?: number
   /**
    * This browser serves one run and nothing else, so what keeps runs apart is lifted: see the top of this file. Never
    * set it on a browser that more than one run is created on.
@@ -263,6 +296,8 @@ export function createCdpScope({
   const targets = new Map<string, TargetInfo>()
   /** A session nobody here owns is never forwarded to or from. */
   const sessions = new Map<string, SessionRecord>()
+  /** The hub's own sessions on the tabs of signing runs: events on them are the hub's, and never reach a client. */
+  const hubSessions = new Map<string, HubSession>()
   let starting = false
   let closed = false
 
@@ -308,10 +343,109 @@ export function createCdpScope({
     )
   }
 
-  /** Lets a tab that is paused at start run, and lets go of it. Used for every tab no client wants. */
-  function discard(sessionId: string) {
-    request('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(ignore)
-    request('Target.detachFromTarget', { sessionId }).catch(ignore)
+  /**
+   * Lets a tab that is paused at start run, and lets go of it. Used for every tab no client wants. A tab being set up to sign is
+   * let run once that is done (`after`), so that even a tab nobody drives (a popup, say) makes its first request signed.
+   */
+  function discard(sessionId: string, after?: Promise<void>) {
+    const go = () => {
+      request('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(ignore)
+      request('Target.detachFromTarget', { sessionId }).catch(ignore)
+    }
+    if (after) void after.then(go)
+    else go()
+  }
+
+  // ---- signing the requests of a run ---------------------------------------------------------------------------------
+
+  /**
+   * Attaches a session of the hub's own to a new tab, and has it sign what the tab requests. A session the client holds is no
+   * place for this: it is let go when the client leaves, the next client gets a fresh one, and what one enables another can
+   * replace. The hub's own lasts as long as the tab, whoever is connected.
+   *
+   * It never rejects: a tab that cannot be set up (or not within `signingSetupMs`) runs unsigned, and a warning says so.
+   */
+  function armTarget(run: Run, targetId: string): Promise<void> {
+    const work = (async () => {
+      const { sessionId } = await request('Target.attachToTarget', { targetId, flatten: true })
+      hubSessions.set(sessionId, { run })
+      await request('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId)
+      // Frames in another process and the like come as targets of their own, under this session: they are armed as they appear.
+      await request(
+        'Target.setAutoAttach',
+        { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
+        sessionId
+      ).catch(ignore)
+    })().catch((error) => log('warn', 'A tab could not be set up for signing', { error: String(error) }))
+    let timer: NodeJS.Timeout | undefined
+    const budget = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        log('warn', 'A tab took too long to be set up for signing: it runs, unsigned until that is done', { targetId })
+        resolve()
+      }, signingSetupMs)
+      timer.unref?.()
+    })
+    return Promise.race([work, budget]).finally(() => clearTimeout(timer))
+  }
+
+  /** A frame or worker that appeared under a hub session. A paused one is always let run, whatever happens to its setup. */
+  async function armChild(child: string, waiting: boolean) {
+    try {
+      await request('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, child)
+      await request(
+        'Target.setAutoAttach',
+        { autoAttach: true, waitForDebuggerOnStart: true, flatten: true },
+        child
+      ).catch(ignore)
+    } catch {
+      // A frame that cannot be intercepted is left as it is.
+    } finally {
+      if (waiting) request('Runtime.runIfWaitingForDebugger', {}, child).catch(ignore)
+    }
+  }
+
+  function onHubSessionEvent(hub: HubSession, message: CdpMessage & { sessionId: string }) {
+    const { method, params = {} } = message
+    if (method === 'Fetch.requestPaused') return signPaused(hub, message.sessionId, params)
+    if (method === 'Target.attachedToTarget' && params.sessionId) {
+      const type = params.targetInfo?.type
+      if (type === 'iframe' || type === 'page') {
+        hubSessions.set(params.sessionId, { run: hub.run, parent: message.sessionId })
+        void armChild(params.sessionId, Boolean(params.waitingForDebugger))
+      } else if (params.waitingForDebugger) {
+        // A worker: Chromium has no interception of its own for it, and its requests are the tab's. It must still be let run.
+        request('Runtime.runIfWaitingForDebugger', {}, params.sessionId).catch(ignore)
+      }
+      return
+    }
+    if (method === 'Target.detachedFromTarget' && params.sessionId) hubSessions.delete(params.sessionId)
+  }
+
+  /**
+   * Answers a request the tab paused: with the signature headers added when it is an http(s) request, and as it is otherwise.
+   * Every paused request is answered, signed or not, or the tab waits for ever. The URL is never changed: the hub's own
+   * commands do not go through the checks a client's do, so it makes none of the choices those checks exist for.
+   */
+  function signPaused(hub: HubSession, sessionId: string, params: Params) {
+    let headers: Array<{ name: string; value: string }> | undefined
+    try {
+      const url = String(params.request?.url ?? '')
+      if (hub.run.sign && /^https?:\/\//i.test(url)) {
+        const signed = hub.run.sign(url)
+        headers = [
+          ...Object.entries((params.request?.headers ?? {}) as Record<string, unknown>)
+            .filter(([name]) => !SIGNATURE_HEADERS.has(name.toLowerCase()))
+            .map(([name, value]) => ({ name, value: String(value) })),
+          ...Object.entries(signed).map(([name, value]) => ({ name, value }))
+        ]
+      }
+    } catch (error) {
+      log('warn', 'A request could not be signed and went out without', { error: String(error) })
+      headers = undefined
+    }
+    request('Fetch.continueRequest', { requestId: params.requestId, ...(headers ? { headers } : {}) }, sessionId).catch(
+      ignore
+    )
   }
 
   function dropSession(sessionId: string) {
@@ -404,6 +538,7 @@ export function createCdpScope({
       case 'Target.attachedToTarget':
         return onAttached(params)
       case 'Target.detachedFromTarget': {
+        hubSessions.delete(params.sessionId)
         const record = sessions.get(params.sessionId)
         if (!record) return
         record.owner.sendRaw(text)
@@ -452,22 +587,36 @@ export function createCdpScope({
       if (starting) request('Target.detachFromTarget', { sessionId }).catch(ignore)
       return
     }
-    const controller = runOf(targetInfo.browserContextId)?.controller
+    const run = runOf(targetInfo.browserContextId)
+    // Started now, and not waited for: the tab is announced at once (a client's createTarget is answered after its announcement),
+    // and only what lets it run waits for the setup.
+    const setup = run?.sign && targetInfo.type === 'page' ? armTarget(run, targetInfo.targetId) : undefined
+    const controller = run?.controller
     if (
       !controller ||
       controller.closed ||
       !DELIVERABLE_TYPES.has(targetInfo.type) ||
       controller.delivered.has(targetInfo.targetId)
     ) {
-      discard(sessionId)
+      discard(sessionId, setup)
       return
     }
     controller.delivered.add(targetInfo.targetId)
-    sessions.set(sessionId, { owner: controller, paused: true })
+    const record: SessionRecord = {
+      owner: controller,
+      paused: true,
+      targetId: targetInfo.targetId,
+      ...(setup ? { setup } : {})
+    }
+    sessions.set(sessionId, record)
+    // Once the setup is done and nothing is held for it, commands are not held: they run at once, in the order they came.
+    if (setup) void setup.then(() => (record.queue ? undefined : delete record.setup))
     controller.send({ method: 'Target.attachedToTarget', params: { sessionId, targetInfo, waitingForDebugger: true } })
   }
 
   function onSessionEvent(message: CdpMessage & { sessionId: string }, text: string) {
+    const hub = hubSessions.get(message.sessionId)
+    if (hub) return onHubSessionEvent(hub, message)
     const record = sessions.get(message.sessionId)
     if (!record) return
     const { method, params = {} } = message
@@ -720,6 +869,33 @@ export function createCdpScope({
   }
 
   function handleSessionCommand(client: Client, message: Command & { sessionId: string }) {
+    const held = sessions.get(message.sessionId)
+    if (held?.owner === client && held.setup) {
+      // The tab is being set up to sign. Everything the client sends it waits, and in the order it was sent: holding only the
+      // resume would let a command that follows it (a navigation sent without waiting) overtake the setup.
+      const tail = (held.queue ?? held.setup).then(() => {
+        if (client.closed) return
+        try {
+          processSessionCommand(client, message)
+        } catch (error) {
+          log('warn', 'A scoped command failed', { method: message.method, error: String(error) })
+          client.sendError(message.id, ERR_INTERNAL, 'The command could not be completed', message.sessionId)
+        }
+      })
+      held.queue = tail
+      // The last command held has run and no newer one waits behind it: the tab is set up, and commands go straight through.
+      void tail.then(() => {
+        if (held.queue === tail) {
+          delete held.queue
+          delete held.setup
+        }
+      })
+      return
+    }
+    processSessionCommand(client, message)
+  }
+
+  function processSessionCommand(client: Client, message: Command & { sessionId: string }) {
     const { id, method, sessionId } = message
     const params = message.params ?? {}
     const record = sessions.get(sessionId)
@@ -794,10 +970,14 @@ export function createCdpScope({
     const owned = [...sessions].filter(([, record]) => record.owner === client).reverse()
     for (const [sessionId, record] of owned) {
       sessions.delete(sessionId)
-      if (!closed) {
+      const finish = () => {
+        if (closed) return
         if (record.paused) request('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(ignore)
         request('Target.detachFromTarget', { sessionId }).catch(ignore)
       }
+      // A tab being set up to sign is let run once that is done, so its first request is signed even though its client left.
+      if (record.setup) void record.setup.then(finish)
+      else finish()
     }
   }
 
@@ -907,6 +1087,7 @@ export function createCdpScope({
             }
           }
         : {}),
+      ...(context?.sign ? { sign: context.sign } : {}),
       contextId: browserContextId,
       contexts: new Set([browserContextId]),
       controller: null,
@@ -920,6 +1101,12 @@ export function createCdpScope({
     const run = runs.get(runKey)
     if (!run) return
     runs.delete(runKey)
+    // The hub's own sessions on this run's tabs end with it: one left attached would go on answering for tabs that are gone.
+    for (const [sessionId, hub] of hubSessions) {
+      if (hub.run !== run) continue
+      hubSessions.delete(sessionId)
+      if (!hub.parent) request('Target.detachFromTarget', { sessionId }).catch(ignore)
+    }
     for (const client of [...run.clients]) evict(client, 4001, 'The slot was released')
     const owned = [...run.contexts]
     for (const contextId of owned) forgetContext(run, contextId)
@@ -941,6 +1128,7 @@ export function createCdpScope({
     contextToRun.clear()
     targets.clear()
     sessions.clear()
+    hubSessions.clear()
   }
 
   return {

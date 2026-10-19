@@ -13,14 +13,17 @@ import type { SlotOptions } from '../protocol.js'
 import { SlotRefusedError } from '../slot-options.js'
 import { runContext, startProxyForwarder, type ProxyForwarder, type ProxyForwarderOptions } from './proxy-forwarder.js'
 import type { CdpScope, RunHost } from './scope.js'
+import { signerFor, type SigningHost } from './signing.js'
 
 export interface ScopeHostOptions extends ProxyForwarderOptions {
   /** For tests: how a slot's forwarder is started. */
   startForwarder?: typeof startProxyForwarder
+  /** How this node signs requests, when it does. */
+  signing?: SigningHost
 }
 
 export function createScopeHost(scope: CdpScope, options: ScopeHostOptions = {}): RunHost {
-  const { startForwarder = startProxyForwarder, ...forwarderOptions } = options
+  const { startForwarder = startProxyForwarder, signing, ...forwarderOptions } = options
   const forwarders = new Map<string, ProxyForwarder>()
 
   return {
@@ -28,9 +31,10 @@ export function createScopeHost(scope: CdpScope, options: ScopeHostOptions = {})
       if (slot?.timezone !== undefined || slot?.locale !== undefined) {
         throw new SlotRefusedError('A shared browser cannot set a time zone or a language for one slot')
       }
+      const signer = signerFor(slot ?? {}, signing)
       const forwarder = slot?.proxy ? await startForwarder(slot.proxy, forwarderOptions) : undefined
       try {
-        const result = await scope.createRun(runKey, runContext(forwarder, slot?.proxy))
+        const result = await scope.createRun(runKey, runContext(forwarder, slot?.proxy, signer))
         if (forwarder) forwarders.set(runKey, forwarder)
         return result
       } catch (error) {

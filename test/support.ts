@@ -121,6 +121,11 @@ export async function startBox(
     labels?: string[]
     exclusive?: boolean
     maxContexts?: number
+    /**
+     * Sign with `key` as a node set to `mode`; the relay publishes `relayKey` (the same key unless a test says otherwise). The
+     * agent is a made-up https address: nothing fetches it, and the tests verify with the key the relay publishes.
+     */
+    webBotAuth?: { mode: 'optional' | 'always'; key: string; relayKey?: string }
   } = {}
 ) {
   const logs: string[] = []
@@ -136,6 +141,7 @@ export async function startBox(
     nodeTimeoutMs: 60_000,
     // The node is connected before a test asks for anything, so a request nobody could serve is answered at once.
     unsupportedGraceMs: 0,
+    webBotAuthKey: options.webBotAuth ? (options.webBotAuth.relayKey ?? options.webBotAuth.key) : undefined,
     logger
   })
   const port = await relay.listen(0, '127.0.0.1')
@@ -151,6 +157,18 @@ export async function startBox(
     hideWebdriver: options.hideWebdriver,
     labels: options.labels,
     exclusive: options.exclusive,
+    ...(options.webBotAuth
+      ? {
+          webBotAuth: {
+            mode: options.webBotAuth.mode,
+            key: options.webBotAuth.key,
+            agent: 'https://box.example.test',
+            // The spelling the reference verifier reads: the draft's, with the dictionary.
+            format: 'dictionary' as const,
+            ttlSeconds: 60
+          }
+        }
+      : {}),
     logger
   })
   await until(() => relay.registry.listNodes().length === 1, 'the node to join', 60_000)

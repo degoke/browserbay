@@ -105,7 +105,7 @@ for (const isolation of ['context', 'process'] as const) {
 
         const node = pool.relay.registry.listNodes()[0]!
         // What matters is what this node offers for the options under test: a proxy always, a language only with a Chromium per
-        // slot.
+        // slot. (Other features, such as whether it can leave a slot unsigned, are not this test's business.)
         assert.ok(node.features?.includes('proxy'), 'a proxy is offered')
         assert.equal(
           node.features?.includes('locale'),

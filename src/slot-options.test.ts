@@ -179,12 +179,31 @@ test('what a node says in its hello is cleaned before the relay keeps it', () =>
   assert.deepEqual(sanitizeFeatures(undefined), [])
 })
 
+test('signRequests is true or false, and what it needs of a node is a way to sign or a way not to', () => {
+  assert.deepEqual(parseSlotOptions({ signRequests: true }), { ok: true, value: { signRequests: true } })
+  assert.deepEqual(parseSlotOptions({ signRequests: false }), { ok: true, value: { signRequests: false } })
+  assert.deepEqual(parseSlotOptions({}), { ok: true, value: {} }, 'left out is the node’s own default')
+  for (const value of ['true', 1, 0, null, {}, []]) {
+    assert.match(
+      problem(parseSlotOptions({ signRequests: value })),
+      /signRequests must be true or false/,
+      JSON.stringify(value)
+    )
+  }
+  assert.deepEqual(parseNodeSlotOptions({ signRequests: false }), { ok: true, value: { signRequests: false } })
+  assert.deepEqual(featuresFor({ signRequests: true }), ['sign'])
+  assert.deepEqual(featuresFor({ signRequests: false }), ['unsigned'])
+  assert.deepEqual(featuresFor({ signRequests: undefined }), [])
+  assert.deepEqual(appliedNames({ signRequests: false }, []), ['signRequests'], 'false is an ask too')
+})
+
 test('every option is a request field, an applied name and something a node is asked for, so one cannot be left out of a list', () => {
   // Typed by OPTION_FIELDS: a new option without a sample here does not compile.
   const sample: Record<(typeof OPTION_FIELDS)[number], unknown> = {
     proxy: { server: 'http://203.0.113.5:8080' },
     timezone: 'Europe/Berlin',
-    locale: 'de-DE'
+    locale: 'de-DE',
+    signRequests: true
   }
   for (const name of OPTION_FIELDS) {
     assert.ok((REQUEST_FIELDS as readonly string[]).includes(name), `${name} is a field a request may carry`)

@@ -68,3 +68,62 @@ test('scope host: a shared browser cannot give one slot its own time zone or lan
   assert.equal(fake.commands('Target.createBrowserContext').length, before)
   assert.equal(forwarders.length, 0, 'not even a forwarder')
 })
+
+// ---- signing --------------------------------------------------------------------------------------------------------
+
+import { generateSigningKey, createRequestSigner } from '../web-bot-auth.js'
+
+const signingKey = generateSigningKey()
+const signingHost = (mode: 'optional' | 'always') => ({
+  mode,
+  signer: createRequestSigner({ key: signingKey.privateJwk, agent: 'https://box.example.com' })
+})
+
+async function signingWorld(mode?: 'optional' | 'always') {
+  const fake = createFakeChromium()
+  fake.createTarget({ url: 'about:blank' })
+  const created: Array<unknown> = []
+  const scope = createCdpScope({ upstream: { send: fake.receive } })
+  const real = scope.createRun
+  scope.createRun = ((runKey: string, context?: unknown) => {
+    created.push(context)
+    return real(runKey, context as never)
+  }) as typeof scope.createRun
+  fake.onMessage(scope.onUpstreamMessage)
+  await scope.start()
+  await fake.flush()
+  return { created, host: createScopeHost(scope, mode ? { signing: signingHost(mode) } : {}) }
+}
+
+test('scope host: a slot is signed when it asks, or when the node always signs, and in no other case', async () => {
+  const optional = await signingWorld('optional')
+  await optional.host.createRun('a')
+  await optional.host.createRun('b', { signRequests: true })
+  await optional.host.createRun('c', { signRequests: false })
+  assert.equal(optional.created[0], undefined, 'optional: a slot that did not ask is made plain')
+  assert.equal(typeof (optional.created[1] as { sign?: unknown }).sign, 'function', 'one that asked is signed')
+  assert.equal(optional.created[2], undefined)
+
+  const always = await signingWorld('always')
+  await always.host.createRun('a')
+  assert.equal(typeof (always.created[0] as { sign?: unknown }).sign, 'function', 'always: every slot')
+  await assert.rejects(always.host.createRun('b', { signRequests: false }), /cannot leave one unsigned/)
+
+  const off = await signingWorld()
+  await off.host.createRun('a')
+  await off.host.createRun('b', { signRequests: false })
+  assert.deepEqual(off.created, [undefined, undefined])
+  await assert.rejects(off.host.createRun('c', { signRequests: true }), /does not sign requests/)
+  assert.equal(off.created.length, 2, 'and nothing was made for the one that could not be')
+})
+
+test('scope host: the signer produces headers for the URL it is given, with the proxy and signing side by side', async () => {
+  const world = await signingWorld('always')
+  await world.host.createRun('s', { proxy: { server: 'http://proxy.example.com:8080' } }).catch(() => undefined)
+  const context = world.created[0] as { sign: (url: string) => Record<string, string>; proxyServer?: string }
+  const headers = context.sign('https://example.com/')
+  assert.deepEqual(Object.keys(headers).sort(), ['signature', 'signature-agent', 'signature-input'])
+  assert.match(headers['signature-input']!, new RegExp(`keyid="${signingKey.keyid}"`))
+  assert.match(context.proxyServer ?? '', /^socks5:\/\/127\./, 'the proxy forwarder is there too')
+  await world.host.disposeRun('s')
+})

@@ -107,6 +107,13 @@ jobs:
           done
           # split mode without the relay's https address must refuse to render
           if helm template ci "$chart" > /dev/null 2>&1; then echo "expected a failure without node.relayUrl"; exit 1; fi
+          # signing without the address the box says it is at, or without a key, must refuse to render
+          if helm template ci "$chart" -f "$chart/ci/in-cluster-values.yaml" --set webBotAuth.mode=optional --set webBotAuth.key=x > /dev/null 2>&1; then
+            echo "expected a failure for webBotAuth without agentUrl"; exit 1
+          fi
+          if helm template ci "$chart" -f "$chart/ci/in-cluster-values.yaml" --set webBotAuth.mode=optional --set webBotAuth.agentUrl=https://b.example.com > /dev/null 2>&1; then
+            echo "expected a failure for webBotAuth without a key"; exit 1
+          fi
           # a misspelled setting must be an error (the values schema), not silently ignored
           if helm template ci "$chart" -f "$chart/ci/split-values.yaml" --set node.networkpolicy.enabled=true > /dev/null 2>&1; then
             echo "expected the values schema to reject a misspelled key"; exit 1
