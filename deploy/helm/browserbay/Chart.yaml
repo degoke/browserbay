@@ -2,8 +2,8 @@ apiVersion: v2
 name: browserbay
 description: Self-hosted browsers for AI agents and automation. One relay, and browser nodes that scale on their own.
 type: application
-version: 0.2.2
-appVersion: '0.2.2'
+version: 0.3.0
+appVersion: '0.3.0'
 home: https://browserbay.3adelabs.com
 sources:
   - https://github.com/degoke/browserbay
