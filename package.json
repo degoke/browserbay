@@ -67,7 +67,7 @@
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.2",
     "http-message-sig": "0.3.0",
-    "playwright": "1.62.1",
+    "playwright": "1.64.1",
     "prettier": "^3.5.3",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
