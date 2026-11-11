@@ -9,7 +9,7 @@
 #   docker build -t browserbay .
 #   docker build --target relay -t browserbay-relay .
 
-FROM node:24-bookworm-slim AS base
+FROM node:26-bookworm-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
@@ -33,7 +33,7 @@ COPY LICENSE package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
-FROM node:24-bookworm-slim AS relay
+FROM node:26-bookworm-slim AS relay
 ENV NODE_ENV=production
 ENV PORT=8788
 WORKDIR /app
@@ -46,7 +46,7 @@ ENTRYPOINT ["node", "dist/cli.js"]
 CMD ["relay"]
 
 # Last, so a plain `docker build .` makes this one.
-FROM node:24-bookworm-slim AS box
+FROM node:26-bookworm-slim AS box
 
 # The Chromium build the tests ran against. Keep in step with the playwright version in package.json.
 ARG PLAYWRIGHT_VERSION=1.62.1
